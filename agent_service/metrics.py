@@ -6,10 +6,14 @@ def get_cpu_metrics():
         load_avg = psutil.getloadavg() if hasattr(psutil, "getloadavg") else []
     except Exception:
         load_avg = []
+    
+    # Use interval=1 for accurate reading (shorter intervals can be unreliable)
+    usage = psutil.cpu_percent(interval=1)
+    per_core = psutil.cpu_percent(interval=None, percpu=True)  # Already measured after the above call
         
     return {
-        "usage_percent": psutil.cpu_percent(interval=None),
-        "per_core_usage": psutil.cpu_percent(interval=None, percpu=True),
+        "usage_percent": usage,
+        "per_core_usage": per_core,
         "freq": psutil.cpu_freq()._asdict() if psutil.cpu_freq() else {},
         "load_avg": load_avg
     }

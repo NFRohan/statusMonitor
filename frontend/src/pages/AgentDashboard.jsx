@@ -18,7 +18,7 @@ const AgentDashboard = () => {
     // Historical data state
     const [historicalCpu, setHistoricalCpu] = useState([]);
     const [historicalMemory, setHistoricalMemory] = useState([]);
-    const [historicalTimeRange, setHistoricalTimeRange] = useState('-1h');
+    const [historicalTimeRange, setHistoricalTimeRange] = useState('-5m');
     const [historicalLoading, setHistoricalLoading] = useState(false);
     const [summary, setSummary] = useState(null);
     const [activeTab, setActiveTab] = useState('realtime'); // 'realtime' or 'historical'
@@ -45,7 +45,15 @@ const AgentDashboard = () => {
     const fetchHistoricalData = async (timeRange) => {
         setHistoricalLoading(true);
         try {
-            const interval = timeRange === '-1h' ? '1m' : timeRange === '-24h' ? '5m' : '30m';
+            // Set appropriate aggregation interval based on time range
+            const intervalMap = {
+                '-5m': '10s',
+                '-30m': '30s',
+                '-1h': '1m',
+                '-24h': '5m',
+                '-7d': '30m'
+            };
+            const interval = intervalMap[timeRange] || '1m';
             
             const [cpuRes, memRes, summaryRes] = await Promise.all([
                 axios.get(`/api/history/${agentId}/cpu?start=${timeRange}&interval=${interval}`),
@@ -99,13 +107,19 @@ const AgentDashboard = () => {
                 if (data.agent_id === parseInt(agentId)) {
                     setMetrics(data);
                     setHistory(prev => {
+                        const now = Date.now();
+                        const thirtySecondsAgo = now - 30000;
                         const flatData = {
                             time: new Date(data.timestamp * 1000).toLocaleTimeString(),
+                            timestamp: data.timestamp * 1000,
                             cpuUsage: data.cpu?.usage_percent || 0,
                             memoryUsage: data.memory?.used_percent || 0,
                         };
-                        const newHistory = [...prev, flatData];
-                        return newHistory.slice(-30);
+                        // Add new data and filter to keep only last 30 seconds
+                        const newHistory = [...prev, flatData].filter(
+                            item => item.timestamp >= thirtySecondsAgo
+                        );
+                        return newHistory;
                     });
                 }
             } catch (e) {
@@ -295,7 +309,7 @@ const AgentDashboard = () => {
                         {/* Charts */}
                         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                             <div className="bg-white shadow rounded-lg p-6">
-                                <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">CPU History</h3>
+                                <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">CPU History (Last 30s)</h3>
                                 <div className="h-64">
                                     <ResponsiveContainer width="100%" height="100%">
                                         <LineChart data={history}>
@@ -326,7 +340,7 @@ const AgentDashboard = () => {
                             </div>
 
                             <div className="bg-white shadow rounded-lg p-6">
-                                <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">Memory History</h3>
+                                <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">Memory History (Last 30s)</h3>
                                 <div className="h-64">
                                     <ResponsiveContainer width="100%" height="100%">
                                         <LineChart data={history}>
@@ -392,18 +406,20 @@ const AgentDashboard = () => {
                     </>
                 )}
                     </>
-                )}            )}
+                )}
 
-            {activeTab === 'historical' && (
+                {activeTab === 'historical' && (
                 <>
                     {/* Time Range Selector */}
                     <div className="mb-6 flex items-center space-x-4">
                         <span className="text-sm font-medium text-gray-700">Time Range:</span>
-                        <div className="flex space-x-2">
+                        <div className="flex space-x-2 flex-wrap gap-1">
                             {[
-                                { value: '-1h', label: 'Last Hour' },
-                                { value: '-24h', label: 'Last 24 Hours' },
-                                { value: '-7d', label: 'Last 7 Days' },
+                                { value: '-5m', label: '5 Min' },
+                                { value: '-30m', label: '30 Min' },
+                                { value: '-1h', label: '1 Hour' },
+                                { value: '-24h', label: '24 Hours' },
+                                { value: '-7d', label: '7 Days' },
                             ].map(({ value, label }) => (
                                 <button
                                     key={value}
