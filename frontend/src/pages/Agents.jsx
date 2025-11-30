@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Link } from 'react-router-dom';
-import { Activity, Plus, Trash2, Copy, RefreshCw, Eye, EyeOff, Monitor, Clock } from 'lucide-react';
+import { Activity, Plus, Trash2, Copy, RefreshCw, Eye, EyeOff, Monitor, Clock, AlertTriangle, CheckCircle } from 'lucide-react';
 import axios from 'axios';
 
 const Agents = () => {
@@ -13,6 +13,7 @@ const Agents = () => {
     const [createdAgent, setCreatedAgent] = useState(null);
     const [visibleTokens, setVisibleTokens] = useState({});
     const [error, setError] = useState('');
+    const [tokenTimeRemaining, setTokenTimeRemaining] = useState(null);
 
     const fetchAgents = async () => {
         try {
@@ -31,6 +32,53 @@ const Agents = () => {
     useEffect(() => {
         fetchAgents();
     }, [tokens]);
+
+    // Countdown timer for token expiration
+    useEffect(() => {
+        if (!createdAgent?.token_expires_at || createdAgent?.token_activated) {
+            setTokenTimeRemaining(null);
+            return;
+        }
+
+        const calculateTimeRemaining = () => {
+            // Server returns UTC timestamp without 'Z', so append it
+            const expiresAtStr = createdAgent.token_expires_at.endsWith('Z') 
+                ? createdAgent.token_expires_at 
+                : createdAgent.token_expires_at + 'Z';
+            const expiresAt = new Date(expiresAtStr).getTime();
+            const now = Date.now();
+            const diff = Math.max(0, Math.floor((expiresAt - now) / 1000));
+            return diff;
+        };
+
+        setTokenTimeRemaining(calculateTimeRemaining());
+
+        const interval = setInterval(() => {
+            const remaining = calculateTimeRemaining();
+            setTokenTimeRemaining(remaining);
+            
+            if (remaining <= 0) {
+                clearInterval(interval);
+            }
+        }, 1000);
+
+        return () => clearInterval(interval);
+    }, [createdAgent]);
+
+    const formatTimeRemaining = (seconds) => {
+        if (seconds === null) return '';
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    };
+
+    const getTimerColor = (seconds) => {
+        if (seconds === null) return '';
+        if (seconds <= 0) return 'text-red-600';
+        if (seconds <= 60) return 'text-red-500';
+        if (seconds <= 120) return 'text-yellow-500';
+        return 'text-green-500';
+    };
 
     const createAgent = async (e) => {
         e.preventDefault();
@@ -200,46 +248,116 @@ const Agents = () => {
                             ) : (
                                 <>
                                     <div className="text-center mb-4">
-                                        <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100 mb-4">
-                                            <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                            </svg>
-                                        </div>
-                                        <h2 className="text-lg font-bold text-gray-900">Agent Created Successfully!</h2>
+                                        {createdAgent.token_activated ? (
+                                            <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100 mb-4">
+                                                <CheckCircle className="h-6 w-6 text-green-600" />
+                                            </div>
+                                        ) : tokenTimeRemaining !== null && tokenTimeRemaining <= 0 ? (
+                                            <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 mb-4">
+                                                <AlertTriangle className="h-6 w-6 text-red-600" />
+                                            </div>
+                                        ) : (
+                                            <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100 mb-4">
+                                                <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                                </svg>
+                                            </div>
+                                        )}
+                                        <h2 className="text-lg font-bold text-gray-900">
+                                            {createdAgent.token_activated 
+                                                ? 'Agent Active!' 
+                                                : tokenTimeRemaining <= 0 
+                                                    ? 'Token Expired!' 
+                                                    : 'Agent Created Successfully!'}
+                                        </h2>
                                         <p className="text-sm text-gray-600 mt-1">"{createdAgent.name}"</p>
                                     </div>
                                     
-                                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
-                                        <h3 className="font-semibold text-yellow-800 mb-2">⚠️ Important: Save Your Token</h3>
-                                        <p className="text-sm text-yellow-700 mb-3">
-                                            Copy this token and configure your agent. This is the <strong>only time</strong> you'll see the full token.
-                                        </p>
-                                        <div className="bg-white border border-yellow-300 rounded p-3">
-                                            <code className="text-xs font-mono break-all text-gray-800 select-all">
-                                                {createdAgent.token}
+                                    {/* Token Expiration Timer */}
+                                    {!createdAgent.token_activated && tokenTimeRemaining !== null && (
+                                        <div className={`mb-4 p-4 rounded-lg border ${
+                                            tokenTimeRemaining <= 0 
+                                                ? 'bg-red-50 border-red-200' 
+                                                : tokenTimeRemaining <= 60 
+                                                    ? 'bg-red-50 border-red-200' 
+                                                    : tokenTimeRemaining <= 120 
+                                                        ? 'bg-yellow-50 border-yellow-200' 
+                                                        : 'bg-blue-50 border-blue-200'
+                                        }`}>
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex items-center">
+                                                    <Clock className={`h-5 w-5 mr-2 ${getTimerColor(tokenTimeRemaining)}`} />
+                                                    <span className="text-sm font-medium">
+                                                        {tokenTimeRemaining <= 0 
+                                                            ? 'Token has expired!' 
+                                                            : 'Token expires in:'}
+                                                    </span>
+                                                </div>
+                                                {tokenTimeRemaining > 0 && (
+                                                    <span className={`text-2xl font-bold font-mono ${getTimerColor(tokenTimeRemaining)}`}>
+                                                        {formatTimeRemaining(tokenTimeRemaining)}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            {tokenTimeRemaining <= 0 && (
+                                                <p className="text-sm text-red-600 mt-2">
+                                                    Click "Regenerate Token" from the agents list to get a new token.
+                                                </p>
+                                            )}
+                                            {tokenTimeRemaining > 0 && (
+                                                <p className="text-xs text-gray-500 mt-2">
+                                                    Configure your agent before the timer expires. Once activated, the token works permanently.
+                                                </p>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {createdAgent.token_activated && (
+                                        <div className="mb-4 p-4 rounded-lg bg-green-50 border border-green-200">
+                                            <div className="flex items-center">
+                                                <CheckCircle className="h-5 w-5 mr-2 text-green-600" />
+                                                <span className="text-sm font-medium text-green-800">
+                                                    Token activated! Agent is connected and working.
+                                                </span>
+                                            </div>
+                                        </div>
+                                    )}
+                                    
+                                    {tokenTimeRemaining > 0 && !createdAgent.token_activated && (
+                                        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
+                                            <h3 className="font-semibold text-yellow-800 mb-2">⚠️ Important: Save Your Token</h3>
+                                            <p className="text-sm text-yellow-700 mb-3">
+                                                Copy this token and configure your agent <strong>within 5 minutes</strong>. Once activated, it works permanently.
+                                            </p>
+                                            <div className="bg-white border border-yellow-300 rounded p-3">
+                                                <code className="text-xs font-mono break-all text-gray-800 select-all">
+                                                    {createdAgent.token}
+                                                </code>
+                                            </div>
+                                            <button
+                                                onClick={() => copyToClipboard(createdAgent.token)}
+                                                className="mt-3 w-full flex items-center justify-center px-4 py-2 bg-yellow-100 text-yellow-800 rounded-md hover:bg-yellow-200 transition-colors"
+                                            >
+                                                <Copy className="h-4 w-4 mr-2" />
+                                                Copy Token to Clipboard
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {tokenTimeRemaining > 0 && !createdAgent.token_activated && (
+                                        <div className="bg-gray-50 rounded-lg p-4 mb-4">
+                                            <h4 className="font-medium text-gray-700 mb-2">Quick Start:</h4>
+                                            <code className="text-xs bg-gray-100 p-2 rounded block overflow-x-auto">
+                                                AGENT_TOKEN={createdAgent.token.substring(0, 20)}... python agent_service/main.py
                                             </code>
                                         </div>
-                                        <button
-                                            onClick={() => copyToClipboard(createdAgent.token)}
-                                            className="mt-3 w-full flex items-center justify-center px-4 py-2 bg-yellow-100 text-yellow-800 rounded-md hover:bg-yellow-200 transition-colors"
-                                        >
-                                            <Copy className="h-4 w-4 mr-2" />
-                                            Copy Token to Clipboard
-                                        </button>
-                                    </div>
-
-                                    <div className="bg-gray-50 rounded-lg p-4 mb-4">
-                                        <h4 className="font-medium text-gray-700 mb-2">Quick Start:</h4>
-                                        <code className="text-xs bg-gray-100 p-2 rounded block overflow-x-auto">
-                                            AGENT_TOKEN={createdAgent.token.substring(0, 20)}... python agent_service/main.py
-                                        </code>
-                                    </div>
+                                    )}
 
                                     <button
                                         onClick={closeAgentModal}
                                         className="w-full px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
                                     >
-                                        I've Saved the Token - Close
+                                        {createdAgent.token_activated ? 'Close' : tokenTimeRemaining <= 0 ? 'Close' : "I've Saved the Token - Close"}
                                     </button>
                                 </>
                             )}
@@ -265,12 +383,25 @@ const Agents = () => {
                                         <div className="flex items-center space-x-4">
                                             <div className={`h-3 w-3 rounded-full ${getStatusColor(agent.last_seen)}`} />
                                             <div>
-                                                <Link
-                                                    to={`/agents/${agent.id}`}
-                                                    className="text-lg font-medium text-indigo-600 hover:text-indigo-800"
-                                                >
-                                                    {agent.name}
-                                                </Link>
+                                                <div className="flex items-center space-x-2">
+                                                    <Link
+                                                        to={`/agents/${agent.id}`}
+                                                        className="text-lg font-medium text-indigo-600 hover:text-indigo-800"
+                                                    >
+                                                        {agent.name}
+                                                    </Link>
+                                                    {agent.token_activated ? (
+                                                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                                            <CheckCircle className="h-3 w-3 mr-1" />
+                                                            Active
+                                                        </span>
+                                                    ) : (
+                                                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                                            <AlertTriangle className="h-3 w-3 mr-1" />
+                                                            Pending Activation
+                                                        </span>
+                                                    )}
+                                                </div>
                                                 <div className="flex items-center text-sm text-gray-500 mt-1">
                                                     <Clock className="h-4 w-4 mr-1" />
                                                     Last seen: {formatDate(agent.last_seen)}

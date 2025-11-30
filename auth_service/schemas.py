@@ -30,6 +30,8 @@ class AgentResponse(BaseModel):
     id: int
     name: str
     token: str
+    token_expires_at: Optional[datetime] = None
+    token_activated: bool = False
     created_at: datetime
     last_seen: Optional[datetime] = None
     is_active: bool
@@ -40,6 +42,7 @@ class AgentResponse(BaseModel):
 class AgentListResponse(BaseModel):
     id: int
     name: str
+    token_activated: bool = False
     created_at: datetime
     last_seen: Optional[datetime] = None
     is_active: bool
@@ -52,3 +55,4 @@ class AgentTokenValidation(BaseModel):
     agent_id: Optional[int] = None
     user_id: Optional[int] = None
     agent_name: Optional[str] = None
+    error: Optional[str] = None

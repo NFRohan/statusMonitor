@@ -194,12 +194,15 @@ async def create_agent(
     """Create a new agent and generate a unique token for it"""
     # Generate a unique token (32 bytes = 64 hex chars)
     agent_token = secrets.token_hex(32)
+    now = datetime.now(timezone.utc)
     
     db_agent = models.Agent(
         name=agent.name,
         token=agent_token,
+        token_expires_at=now + timedelta(minutes=5),  # Token expires in 5 minutes
+        token_activated=False,
         user_id=current_user.id,
-        created_at=datetime.now(timezone.utc),
+        created_at=now,
         is_active=True
     )
     db.add(db_agent)
@@ -266,7 +269,10 @@ async def regenerate_agent_token(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
+    now = datetime.now(timezone.utc)
     agent.token = secrets.token_hex(32)
+    agent.token_expires_at = now + timedelta(minutes=5)  # Reset 5-minute timer
+    agent.token_activated = False  # Reset activation status
     db.commit()
     db.refresh(agent)
     return agent
@@ -283,8 +289,25 @@ async def validate_agent_token(token: str, db: Session = Depends(get_db)):
     if not agent:
         return schemas.AgentTokenValidation(valid=False)
     
+    now = datetime.now(timezone.utc)
+    
+    # Check if token has already been activated (permanent use allowed)
+    if not agent.token_activated:
+        # Token not yet activated - check if within 5-minute window
+        if agent.token_expires_at:
+            # Make sure we compare timezone-aware datetimes
+            expires_at = agent.token_expires_at
+            if expires_at.tzinfo is None:
+                # Database returned naive datetime, treat as UTC
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if now > expires_at:
+                return schemas.AgentTokenValidation(valid=False, error="Token expired. Please regenerate.")
+        
+        # First use - activate the token (makes it permanent)
+        agent.token_activated = True
+    
     # Update last_seen
-    agent.last_seen = datetime.now(timezone.utc)
+    agent.last_seen = now
     db.commit()
     
     return schemas.AgentTokenValidation(

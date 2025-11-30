@@ -29,6 +29,8 @@ class Agent(database.Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     token = Column(String, unique=True, index=True)
+    token_expires_at = Column(DateTime, nullable=True)  # Token expires 5 min after creation/regeneration
+    token_activated = Column(Boolean, default=False)  # True once token is first used
     user_id = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime)
     last_seen = Column(DateTime, nullable=True)
