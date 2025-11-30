@@ -1,6 +1,7 @@
 """
 Status Monitor Agent - GUI Application
 A standalone desktop application for monitoring system metrics.
+Includes Platform-Agnostic Real-Time CPU Frequency Monitoring.
 """
 
 import tkinter as tk
@@ -10,37 +11,148 @@ import time
 import json
 import os
 import sys
+import platform
 from pathlib import Path
 
 import requests
 import psutil
+
+# --- Platform Specific Imports for CPU Frequency ---
+if platform.system() == 'Windows':
+    import ctypes
+    from ctypes import byref, c_long, c_double, c_ulong, Structure, POINTER
+    from ctypes.wintypes import DWORD, LPCSTR, LPCWSTR
 
 # Configuration file path
 CONFIG_DIR = Path.home() / ".statusmonitor"
 CONFIG_FILE = CONFIG_DIR / "agent_config.json"
 
 
+class CPUFrequencyMonitor:
+    """
+    Platform-agnostic CPU frequency monitor.
+    Uses Windows PDH for accurate Turbo Boost readings on Windows.
+    Uses /sys/fs on Linux.
+    Falls back to psutil for macOS/others.
+    """
+    def __init__(self):
+        self.os_type = platform.system()
+        self.pdh_query = None
+        self.pdh_counter = None
+        
+        if self.os_type == 'Windows':
+            self._setup_windows_pdh()
+    
+    def _setup_windows_pdh(self):
+        try:
+            # Define Windows Structures locally to avoid polluting global namespace
+            PDH_FMT_DOUBLE = 0x00000200
+            ERROR_SUCCESS = 0x00000000
+
+            self.pdh = ctypes.windll.pdh
+            self.pdh_query = ctypes.c_void_p()
+            self.pdh_counter = ctypes.c_void_p()
+            
+            if self.pdh.PdhOpenQueryW(None, 0, byref(self.pdh_query)) != ERROR_SUCCESS:
+                return
+
+            # Try English counter path first, then legacy
+            counter_path = r"\Processor Information(_Total)\% Processor Performance"
+            if self.pdh.PdhAddEnglishCounterW(self.pdh_query, counter_path, 0, byref(self.pdh_counter)) != ERROR_SUCCESS:
+                counter_path_legacy = r"\Processor(_Total)\% Processor Performance"
+                self.pdh.PdhAddEnglishCounterW(self.pdh_query, counter_path_legacy, 0, byref(self.pdh_counter))
+                    
+            self.pdh.PdhCollectQueryData(self.pdh_query)
+            
+        except Exception as e:
+            print(f"PDH Init Error: {e}")
+            self.pdh_query = None
+
+    def get_frequency(self):
+        """Returns current CPU frequency in MHz."""
+        if self.os_type == 'Windows':
+            return self._get_windows_real_freq()
+        elif self.os_type == 'Linux':
+            return self._get_linux_real_freq()
+        else:
+            # macOS and others
+            return psutil.cpu_freq().current
+
+    def _get_windows_real_freq(self):
+        if not self.pdh_query:
+            return psutil.cpu_freq().current
+
+        base_freq = psutil.cpu_freq().max
+        if base_freq == 0.0:
+            base_freq = psutil.cpu_freq().current
+
+        # Define structure for return value
+        class PDH_FMT_COUNTERVALUE(Structure):
+            _fields_ = [("CStatus", DWORD), ("doubleValue", c_double)]
+
+        self.pdh.PdhCollectQueryData(self.pdh_query)
+        ctype_type = DWORD(0)
+        value = PDH_FMT_COUNTERVALUE()
+        PDH_FMT_DOUBLE = 0x00000200
+        
+        res = self.pdh.PdhGetFormattedCounterValue(
+            self.pdh_counter, PDH_FMT_DOUBLE, byref(ctype_type), byref(value)
+        )
+        
+        if res != 0: # ERROR_SUCCESS
+            return base_freq
+
+        return base_freq * (value.doubleValue / 100.0)
+
+    def _get_linux_real_freq(self):
+        try:
+            with open('/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq', 'r') as f:
+                return int(f.read().strip()) / 1000.0
+        except:
+            return psutil.cpu_freq().current
+
+
 class MetricsCollector:
     """Collects system metrics."""
     
-    # Prime psutil.cpu_percent() at module load to establish a baseline
-    # Without this, the first call can return 0 or 100%
     _initialized = False
+    _freq_monitor = None
     
     @classmethod
     def initialize(cls):
-        """Initialize CPU monitoring baseline."""
+        """Initialize CPU monitoring baseline and Frequency Monitor."""
         if not cls._initialized:
-            psutil.cpu_percent(interval=None)  # Prime the baseline
+            # Prime psutil blocking call
+            psutil.cpu_percent(interval=None)
+            
+            # Initialize our custom frequency monitor
+            cls._freq_monitor = CPUFrequencyMonitor()
+            
             cls._initialized = True
     
-    @staticmethod
-    def get_cpu_metrics():
-        # Use interval=1 for accurate reading (shorter intervals can be unreliable)
+    @classmethod
+    def get_cpu_metrics(cls):
+        # Use interval=1 for accurate usage reading
         usage = psutil.cpu_percent(interval=1)
+        per_core = psutil.cpu_percent(interval=None, percpu=True)
+        
+        # Get accurate frequency from our new monitor
+        current_freq = cls._freq_monitor.get_frequency() if cls._freq_monitor else psutil.cpu_freq().current
+        
+        # Get psutil freq for min/max values
+        psutil_freq = psutil.cpu_freq()
+        freq_info = {
+            "current": current_freq,
+            "min": psutil_freq.min if psutil_freq else 0,
+            "max": psutil_freq.max if psutil_freq else 0,
+        }
+        
         return {
             "usage_percent": usage,
-            "count": psutil.cpu_count(),
+            "per_core_usage": per_core,
+            "freq": freq_info,
+            "frequency_mhz": current_freq,  # Keep for backward compat with local display
+            "count": psutil.cpu_count(logical=False),
             "count_logical": psutil.cpu_count(logical=True),
         }
     
@@ -110,7 +222,6 @@ class ConfigManager:
             try:
                 with open(CONFIG_FILE, 'r') as f:
                     config = json.load(f)
-                    # Merge with defaults for any missing keys
                     return {**cls.DEFAULT_CONFIG, **config}
             except (json.JSONDecodeError, IOError):
                 pass
@@ -156,11 +267,9 @@ class AgentGUI:
     
     def setup_ui(self):
         """Setup the user interface."""
-        # Create notebook for tabs
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Create tabs
         self.status_frame = ttk.Frame(self.notebook)
         self.settings_frame = ttk.Frame(self.notebook)
         
@@ -172,7 +281,6 @@ class AgentGUI:
     
     def setup_status_tab(self):
         """Setup the status tab."""
-        # Header
         header_frame = ttk.Frame(self.status_frame)
         header_frame.pack(fill=tk.X, padx=20, pady=20)
         
@@ -182,14 +290,12 @@ class AgentGUI:
             font=("Segoe UI", 16, "bold")
         ).pack()
         
-        # Status indicator
         self.status_frame_inner = ttk.LabelFrame(self.status_frame, text="Agent Status")
         self.status_frame_inner.pack(fill=tk.X, padx=20, pady=10)
         
         status_content = ttk.Frame(self.status_frame_inner)
         status_content.pack(fill=tk.X, padx=15, pady=15)
         
-        # Status light and text
         status_row = ttk.Frame(status_content)
         status_row.pack(fill=tk.X)
         
@@ -200,7 +306,6 @@ class AgentGUI:
         self.status_label = ttk.Label(status_row, text="Stopped", font=("Segoe UI", 12))
         self.status_label.pack(side=tk.LEFT, padx=10)
         
-        # Metrics counter
         ttk.Separator(status_content, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
         
         metrics_row = ttk.Frame(status_content)
@@ -210,18 +315,15 @@ class AgentGUI:
         self.metrics_count_label = ttk.Label(metrics_row, text="0", font=("Segoe UI", 10, "bold"))
         self.metrics_count_label.pack(side=tk.LEFT, padx=5)
         
-        # Last error
         self.error_label = ttk.Label(status_content, text="", foreground="red", wraplength=400)
         self.error_label.pack(fill=tk.X, pady=(10, 0))
         
-        # Current Metrics Display
         metrics_frame = ttk.LabelFrame(self.status_frame, text="Current Metrics")
         metrics_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
         
         self.metrics_text = tk.Text(metrics_frame, height=12, state=tk.DISABLED, font=("Consolas", 9))
         self.metrics_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Control buttons
         button_frame = ttk.Frame(self.status_frame)
         button_frame.pack(fill=tk.X, padx=20, pady=20)
         
@@ -243,11 +345,9 @@ class AgentGUI:
     
     def setup_settings_tab(self):
         """Setup the settings tab."""
-        # Settings form
         form_frame = ttk.Frame(self.settings_frame)
         form_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
-        # Server URL
         ttk.Label(form_frame, text="Server URL:", font=("Segoe UI", 10)).pack(anchor=tk.W)
         self.server_url_var = tk.StringVar(value=self.config.get("server_url", ""))
         server_entry = ttk.Entry(form_frame, textvariable=self.server_url_var, width=50)
@@ -261,7 +361,6 @@ class AgentGUI:
         
         ttk.Separator(form_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
         
-        # Agent Token
         ttk.Label(form_frame, text="Agent Token:", font=("Segoe UI", 10)).pack(anchor=tk.W, pady=(10, 0))
         self.token_var = tk.StringVar(value=self.config.get("agent_token", ""))
         
@@ -290,7 +389,6 @@ class AgentGUI:
         
         ttk.Separator(form_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
         
-        # Interval
         ttk.Label(form_frame, text="Collection Interval (seconds):", font=("Segoe UI", 10)).pack(anchor=tk.W, pady=(10, 0))
         
         interval_frame = ttk.Frame(form_frame)
@@ -314,7 +412,6 @@ class AgentGUI:
         
         ttk.Separator(form_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
         
-        # Auto-start
         self.auto_start_var = tk.BooleanVar(value=self.config.get("auto_start", False))
         auto_start_check = ttk.Checkbutton(
             form_frame, 
@@ -323,7 +420,6 @@ class AgentGUI:
         )
         auto_start_check.pack(anchor=tk.W, pady=(10, 0))
         
-        # Buttons
         button_frame = ttk.Frame(form_frame)
         button_frame.pack(fill=tk.X, pady=(30, 0))
         
@@ -340,7 +436,6 @@ class AgentGUI:
             style="Accent.TButton"
         ).pack(side=tk.RIGHT)
         
-        # Info
         info_frame = ttk.LabelFrame(self.settings_frame, text="How to get a token")
         info_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
         
@@ -385,7 +480,9 @@ class AgentGUI:
         self.metrics_text.config(state=tk.NORMAL)
         self.metrics_text.delete(1.0, tk.END)
         
+        # ADDED: Display frequency in the text box
         text = f"""CPU Usage: {metrics['cpu']['usage_percent']:.1f}%
+CPU Freq:  {metrics['cpu']['frequency_mhz']:.2f} MHz
 CPU Cores: {metrics['cpu']['count']} physical, {metrics['cpu']['count_logical']} logical
 
 Memory Usage: {metrics['memory']['used_percent']:.1f}%
