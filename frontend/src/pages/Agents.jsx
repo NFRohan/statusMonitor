@@ -82,6 +82,7 @@ const Agents = () => {
                 { headers: { Authorization: `Bearer ${tokens.access_token}` } }
             );
             setCreatedAgent(response.data);
+            setShowNewAgentForm(true); // Show the modal with the new token
             fetchAgents();
         } catch (err) {
             console.error('Failed to regenerate token:', err);
@@ -162,68 +163,87 @@ const Agents = () => {
                 {showNewAgentForm && (
                     <div className="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center z-50">
                         <div className="bg-white rounded-lg p-6 w-full max-w-md">
-                            <h2 className="text-lg font-bold mb-4">Create New Agent</h2>
-                            <form onSubmit={createAgent}>
-                                <div className="mb-4">
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                                        Agent Name
-                                    </label>
-                                    <input
-                                        type="text"
-                                        value={newAgentName}
-                                        onChange={(e) => setNewAgentName(e.target.value)}
-                                        placeholder="e.g., My Desktop, Work Laptop"
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                        required
-                                    />
-                                </div>
-                                <div className="flex justify-end space-x-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => setShowNewAgentForm(false)}
-                                        className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
-                                    >
-                                        Cancel
-                                    </button>
-                                    <button
-                                        type="submit"
-                                        className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
-                                    >
-                                        Create
-                                    </button>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-                )}
+                            {!createdAgent ? (
+                                <>
+                                    <h2 className="text-lg font-bold mb-4">Create New Agent</h2>
+                                    <form onSubmit={createAgent}>
+                                        <div className="mb-4">
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                                Agent Name
+                                            </label>
+                                            <input
+                                                type="text"
+                                                value={newAgentName}
+                                                onChange={(e) => setNewAgentName(e.target.value)}
+                                                placeholder="e.g., My Desktop, Work Laptop"
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                                required
+                                            />
+                                        </div>
+                                        <div className="flex justify-end space-x-2">
+                                            <button
+                                                type="button"
+                                                onClick={closeAgentModal}
+                                                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button
+                                                type="submit"
+                                                className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
+                                            >
+                                                Create
+                                            </button>
+                                        </div>
+                                    </form>
+                                </>
+                            ) : (
+                                <>
+                                    <div className="text-center mb-4">
+                                        <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100 mb-4">
+                                            <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                            </svg>
+                                        </div>
+                                        <h2 className="text-lg font-bold text-gray-900">Agent Created Successfully!</h2>
+                                        <p className="text-sm text-gray-600 mt-1">"{createdAgent.name}"</p>
+                                    </div>
+                                    
+                                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
+                                        <h3 className="font-semibold text-yellow-800 mb-2">⚠️ Important: Save Your Token</h3>
+                                        <p className="text-sm text-yellow-700 mb-3">
+                                            Copy this token and configure your agent. This is the <strong>only time</strong> you'll see the full token.
+                                        </p>
+                                        <div className="bg-white border border-yellow-300 rounded p-3">
+                                            <code className="text-xs font-mono break-all text-gray-800 select-all">
+                                                {createdAgent.token}
+                                            </code>
+                                        </div>
+                                        <button
+                                            onClick={() => copyToClipboard(createdAgent.token)}
+                                            className="mt-3 w-full flex items-center justify-center px-4 py-2 bg-yellow-100 text-yellow-800 rounded-md hover:bg-yellow-200 transition-colors"
+                                        >
+                                            <Copy className="h-4 w-4 mr-2" />
+                                            Copy Token to Clipboard
+                                        </button>
+                                    </div>
 
-                {/* Created Agent Token Display */}
-                {createdAgent && (
-                    <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
-                        <h3 className="font-bold text-green-800 mb-2">
-                            Agent "{createdAgent.name}" Token
-                        </h3>
-                        <p className="text-sm text-green-700 mb-2">
-                            Copy this token and use it to configure your agent. This is the only time you'll see the full token.
-                        </p>
-                        <div className="flex items-center space-x-2">
-                            <code className="flex-1 p-2 bg-white border rounded text-sm font-mono break-all">
-                                {createdAgent.token}
-                            </code>
-                            <button
-                                onClick={() => copyToClipboard(createdAgent.token)}
-                                className="p-2 text-green-600 hover:text-green-800"
-                                title="Copy to clipboard"
-                            >
-                                <Copy className="h-5 w-5" />
-                            </button>
+                                    <div className="bg-gray-50 rounded-lg p-4 mb-4">
+                                        <h4 className="font-medium text-gray-700 mb-2">Quick Start:</h4>
+                                        <code className="text-xs bg-gray-100 p-2 rounded block overflow-x-auto">
+                                            AGENT_TOKEN={createdAgent.token.substring(0, 20)}... python agent_service/main.py
+                                        </code>
+                                    </div>
+
+                                    <button
+                                        onClick={closeAgentModal}
+                                        className="w-full px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
+                                    >
+                                        I've Saved the Token - Close
+                                    </button>
+                                </>
+                            )}
                         </div>
-                        <button
-                            onClick={() => setCreatedAgent(null)}
-                            className="mt-2 text-sm text-green-600 hover:text-green-800"
-                        >
-                            Dismiss
-                        </button>
                     </div>
                 )}
 
