@@ -76,6 +76,56 @@ services:
       timeout: 5s
       retries: 5
 
+  history-service:
+    build:
+      context: ./history_service
+      dockerfile: Dockerfile
+    container_name: statusmonitor-history
+    ports:
+      - "8003:8003"
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+    networks:
+      - statusmonitor-network
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=statusmonitor-secret-token
+      - INFLUXDB_ORG=statusmonitor
+      - INFLUXDB_BUCKET=metrics
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: statusmonitor-influxdb
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    networks:
+      - statusmonitor-network
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=statusmonitor123
+      - DOCKER_INFLUXDB_INIT_ORG=statusmonitor
+      - DOCKER_INFLUXDB_INIT_BUCKET=metrics
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=statusmonitor-secret-token
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   frontend:
     build:
       context: ./frontend
@@ -88,6 +138,10 @@ services:
       - distribution-service
     networks:
       - statusmonitor-network
+
+volumes:
+  influxdb-data:
+  influxdb-config:
 
 networks:
   statusmonitor-network:

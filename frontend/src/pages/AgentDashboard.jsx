@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useParams, Link } from 'react-router-dom';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { ArrowLeft, Activity, HardDrive, Cpu, Network, Clock } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area } from 'recharts';
+import { ArrowLeft, Activity, HardDrive, Cpu, Network, Clock, History, TrendingUp } from 'lucide-react';
 import axios from 'axios';
 
 const AgentDashboard = () => {
@@ -14,6 +14,14 @@ const AgentDashboard = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [connected, setConnected] = useState(false);
+    
+    // Historical data state
+    const [historicalCpu, setHistoricalCpu] = useState([]);
+    const [historicalMemory, setHistoricalMemory] = useState([]);
+    const [historicalTimeRange, setHistoricalTimeRange] = useState('-1h');
+    const [historicalLoading, setHistoricalLoading] = useState(false);
+    const [summary, setSummary] = useState(null);
+    const [activeTab, setActiveTab] = useState('realtime'); // 'realtime' or 'historical'
 
     // Fetch agent details
     useEffect(() => {
@@ -33,11 +41,51 @@ const AgentDashboard = () => {
         fetchAgent();
     }, [agentId, tokens]);
 
+    // Fetch historical data
+    const fetchHistoricalData = async (timeRange) => {
+        setHistoricalLoading(true);
+        try {
+            const interval = timeRange === '-1h' ? '1m' : timeRange === '-24h' ? '5m' : '30m';
+            
+            const [cpuRes, memRes, summaryRes] = await Promise.all([
+                axios.get(`/api/history/${agentId}/cpu?start=${timeRange}&interval=${interval}`),
+                axios.get(`/api/history/${agentId}/memory?start=${timeRange}&interval=${interval}`),
+                axios.get(`/api/history/${agentId}/summary?start=${timeRange}`)
+            ]);
+            
+            setHistoricalCpu(cpuRes.data.data.map(d => ({
+                time: new Date(d.time).toLocaleString(),
+                value: d.value
+            })));
+            
+            setHistoricalMemory(memRes.data.data.map(d => ({
+                time: new Date(d.time).toLocaleString(),
+                value: d.value
+            })));
+            
+            setSummary(summaryRes.data);
+        } catch (err) {
+            console.error('Failed to fetch historical data:', err);
+        } finally {
+            setHistoricalLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (activeTab === 'historical') {
+            fetchHistoricalData(historicalTimeRange);
+        }
+    }, [activeTab, historicalTimeRange, agentId]);
+
     // WebSocket connection for real-time metrics
     useEffect(() => {
         if (!user) return;
 
-        const ws = new WebSocket(`ws://localhost:8002/ws?user_id=${user.id}&agent_id=${agentId}`);
+        // Use relative WebSocket URL through nginx proxy
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws?user_id=${user.id}&agent_id=${agentId}`;
+        console.log('Connecting to WebSocket:', wsUrl);
+        const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
             console.log('WebSocket connected');
@@ -132,7 +180,37 @@ const AgentDashboard = () => {
             </nav>
 
             <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-                {!metrics ? (
+                {/* Tabs */}
+                <div className="mb-6 border-b border-gray-200">
+                    <nav className="-mb-px flex space-x-8">
+                        <button
+                            onClick={() => setActiveTab('realtime')}
+                            className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                                activeTab === 'realtime'
+                                    ? 'border-indigo-500 text-indigo-600'
+                                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                            }`}
+                        >
+                            <Activity className="inline h-4 w-4 mr-2" />
+                            Real-time
+                        </button>
+                        <button
+                            onClick={() => setActiveTab('historical')}
+                            className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                                activeTab === 'historical'
+                                    ? 'border-indigo-500 text-indigo-600'
+                                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                            }`}
+                        >
+                            <History className="inline h-4 w-4 mr-2" />
+                            Historical
+                        </button>
+                    </nav>
+                </div>
+
+                {activeTab === 'realtime' && (
+                    <>
+                        {!metrics ? (
                     <div className="text-center py-12 bg-white rounded-lg shadow">
                         <Clock className="mx-auto h-12 w-12 text-gray-400 animate-pulse" />
                         <h3 className="mt-2 text-sm font-medium text-gray-900">Waiting for metrics...</h3>
@@ -313,6 +391,199 @@ const AgentDashboard = () => {
                         </div>
                     </>
                 )}
+                    </>
+                )}            )}
+
+            {activeTab === 'historical' && (
+                <>
+                    {/* Time Range Selector */}
+                    <div className="mb-6 flex items-center space-x-4">
+                        <span className="text-sm font-medium text-gray-700">Time Range:</span>
+                        <div className="flex space-x-2">
+                            {[
+                                { value: '-1h', label: 'Last Hour' },
+                                { value: '-24h', label: 'Last 24 Hours' },
+                                { value: '-7d', label: 'Last 7 Days' },
+                            ].map(({ value, label }) => (
+                                <button
+                                    key={value}
+                                    onClick={() => setHistoricalTimeRange(value)}
+                                    className={`px-3 py-1 text-sm rounded-md ${
+                                        historicalTimeRange === value
+                                            ? 'bg-indigo-600 text-white'
+                                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                    }`}
+                                >
+                                    {label}
+                                </button>
+                            ))}
+                        </div>
+                        <button
+                            onClick={() => fetchHistoricalData(historicalTimeRange)}
+                            className="ml-auto px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200"
+                        >
+                            Refresh
+                        </button>
+                    </div>
+
+                    {historicalLoading ? (
+                        <div className="text-center py-12 bg-white rounded-lg shadow">
+                            <Clock className="mx-auto h-12 w-12 text-gray-400 animate-spin" />
+                            <h3 className="mt-2 text-sm font-medium text-gray-900">Loading historical data...</h3>
+                        </div>
+                    ) : (
+                        <>
+                            {/* Summary Cards */}
+                            {summary && (
+                                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+                                    <div className="bg-white overflow-hidden shadow rounded-lg">
+                                        <div className="p-5">
+                                            <div className="flex items-center">
+                                                <Cpu className="h-6 w-6 text-indigo-500" />
+                                                <div className="ml-5">
+                                                    <p className="text-sm font-medium text-gray-500">Avg CPU</p>
+                                                    <p className="text-2xl font-semibold text-gray-900">
+                                                        {summary.cpu.avg.toFixed(1)}%
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="bg-white overflow-hidden shadow rounded-lg">
+                                        <div className="p-5">
+                                            <div className="flex items-center">
+                                                <TrendingUp className="h-6 w-6 text-red-500" />
+                                                <div className="ml-5">
+                                                    <p className="text-sm font-medium text-gray-500">Peak CPU</p>
+                                                    <p className="text-2xl font-semibold text-gray-900">
+                                                        {summary.cpu.max.toFixed(1)}%
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="bg-white overflow-hidden shadow rounded-lg">
+                                        <div className="p-5">
+                                            <div className="flex items-center">
+                                                <Activity className="h-6 w-6 text-green-500" />
+                                                <div className="ml-5">
+                                                    <p className="text-sm font-medium text-gray-500">Avg Memory</p>
+                                                    <p className="text-2xl font-semibold text-gray-900">
+                                                        {summary.memory.avg.toFixed(1)}%
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="bg-white overflow-hidden shadow rounded-lg">
+                                        <div className="p-5">
+                                            <div className="flex items-center">
+                                                <TrendingUp className="h-6 w-6 text-orange-500" />
+                                                <div className="ml-5">
+                                                    <p className="text-sm font-medium text-gray-500">Peak Memory</p>
+                                                    <p className="text-2xl font-semibold text-gray-900">
+                                                        {summary.memory.max.toFixed(1)}%
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Historical Charts */}
+                            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                                <div className="bg-white shadow rounded-lg p-6">
+                                    <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
+                                        CPU Usage History
+                                    </h3>
+                                    <div className="h-72">
+                                        {historicalCpu.length > 0 ? (
+                                            <ResponsiveContainer width="100%" height="100%">
+                                                <AreaChart data={historicalCpu}>
+                                                    <CartesianGrid strokeDasharray="3 3" />
+                                                    <XAxis 
+                                                        dataKey="time" 
+                                                        tick={{ fontSize: 10 }}
+                                                        interval="preserveStartEnd"
+                                                        angle={-45}
+                                                        textAnchor="end"
+                                                        height={60}
+                                                    />
+                                                    <YAxis 
+                                                        domain={[0, 100]} 
+                                                        tickFormatter={(value) => `${value}%`}
+                                                    />
+                                                    <Tooltip formatter={(value) => [`${value.toFixed(1)}%`, 'CPU']} />
+                                                    <Area 
+                                                        type="monotone" 
+                                                        dataKey="value" 
+                                                        stroke="#8884d8" 
+                                                        fill="#8884d8"
+                                                        fillOpacity={0.3}
+                                                        name="CPU %" 
+                                                    />
+                                                </AreaChart>
+                                            </ResponsiveContainer>
+                                        ) : (
+                                            <div className="h-full flex items-center justify-center text-gray-500">
+                                                No historical data available
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="bg-white shadow rounded-lg p-6">
+                                    <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
+                                        Memory Usage History
+                                    </h3>
+                                    <div className="h-72">
+                                        {historicalMemory.length > 0 ? (
+                                            <ResponsiveContainer width="100%" height="100%">
+                                                <AreaChart data={historicalMemory}>
+                                                    <CartesianGrid strokeDasharray="3 3" />
+                                                    <XAxis 
+                                                        dataKey="time" 
+                                                        tick={{ fontSize: 10 }}
+                                                        interval="preserveStartEnd"
+                                                        angle={-45}
+                                                        textAnchor="end"
+                                                        height={60}
+                                                    />
+                                                    <YAxis 
+                                                        domain={[0, 100]} 
+                                                        tickFormatter={(value) => `${value}%`}
+                                                    />
+                                                    <Tooltip formatter={(value) => [`${value.toFixed(1)}%`, 'Memory']} />
+                                                    <Area 
+                                                        type="monotone" 
+                                                        dataKey="value" 
+                                                        stroke="#82ca9d" 
+                                                        fill="#82ca9d"
+                                                        fillOpacity={0.3}
+                                                        name="Mem %" 
+                                                    />
+                                                </AreaChart>
+                                            </ResponsiveContainer>
+                                        ) : (
+                                            <div className="h-full flex items-center justify-center text-gray-500">
+                                                No historical data available
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Data Points Info */}
+                            {summary && (
+                                <div className="mt-4 text-center text-sm text-gray-500">
+                                    Based on {summary.cpu.data_points} data points
+                                </div>
+                            )}
+                        </>
+                    )}
+                </>
+            )}
             </main>
         </div>
     );

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { Navigate } from 'react-router-dom';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { LogOut, Activity, HardDrive, Cpu, Network } from 'lucide-react';
 
@@ -8,8 +9,16 @@ const Dashboard = () => {
     const [metrics, setMetrics] = useState(null);
     const [history, setHistory] = useState([]);
 
+    // Redirect to agents page - the new default view
+    if (user) {
+        return <Navigate to="/agents" replace />;
+    }
+
     useEffect(() => {
-        const ws = new WebSocket('ws://localhost:8002/ws');
+        if (!user) return;
+        
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?user_id=${user.id}`);
 
         ws.onmessage = (event) => {
             try {
@@ -33,7 +42,7 @@ const Dashboard = () => {
         return () => {
             ws.close();
         };
-    }, []);
+    }, [user]);
 
     if (!metrics) return <div className="min-h-screen flex items-center justify-center">Loading metrics...</div>;
 

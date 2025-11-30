@@ -8,9 +8,13 @@ import metrics
 
 load_dotenv()
 
-INGESTION_URL = os.getenv("INGESTION_URL", "http://localhost:8001/ingest")
+INGESTION_URL = os.getenv("INGESTION_URL", "http://localhost:8001")
 AGENT_TOKEN = os.getenv("AGENT_TOKEN", "")
 INTERVAL = int(os.getenv("INTERVAL", "5"))
+
+# Ensure URL has /ingest endpoint
+if not INGESTION_URL.endswith("/ingest"):
+    INGESTION_URL = INGESTION_URL.rstrip("/") + "/ingest"
 
 def main():
     if not AGENT_TOKEN:

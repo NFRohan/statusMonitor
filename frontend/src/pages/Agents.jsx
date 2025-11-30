@@ -44,11 +44,18 @@ const Agents = () => {
             );
             setCreatedAgent(response.data);
             setNewAgentName('');
+            // Don't close the modal - we'll show the token in it instead
             fetchAgents();
         } catch (err) {
             console.error('Failed to create agent:', err);
             setError('Failed to create agent');
         }
+    };
+
+    const closeAgentModal = () => {
+        setShowNewAgentForm(false);
+        setCreatedAgent(null);
+        setNewAgentName('');
     };
 
     const deleteAgent = async (agentId) => {
