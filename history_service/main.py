@@ -4,7 +4,7 @@ import redis.asyncio as redis
 import asyncio
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -60,7 +60,7 @@ def store_metrics(data: dict):
         agent_id = data.get("agent_id")
         user_id = data.get("user_id")
         agent_name = data.get("agent_name", "unknown")
-        timestamp = datetime.utcfromtimestamp(data.get("timestamp", datetime.utcnow().timestamp()))
+        timestamp = datetime.fromtimestamp(data.get("timestamp", datetime.now(timezone.utc).timestamp()), tz=timezone.utc)
         
         points = []
         
@@ -151,7 +151,6 @@ async def redis_subscriber():
                     try:
                         data = json.loads(message["data"])
                         store_metrics(data)
-                        print(f"Stored metrics for agent {data.get('agent_id')}")
                     except json.JSONDecodeError as e:
                         print(f"Error parsing message: {e}")
                 await asyncio.sleep(0.1)

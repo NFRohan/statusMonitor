@@ -45,8 +45,6 @@ dist/
 
 # Test files
 test_*.py
-!test_ws.py
-!test_ws_quick.py
 
 # Logs
 *.log

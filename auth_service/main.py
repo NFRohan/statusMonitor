@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 from jose import JWTError, jwt
 from typing import List
 import secrets
@@ -44,7 +44,6 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/token", response_model=schemas.Token)
 def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    print(f"DEBUG: Login attempt for username='{form_data.username}' password='{form_data.password}'")
     user = db.query(models.User).filter(models.User.username == form_data.username).first()
     if not user or not auth.verify_password(form_data.password, user.password_hash):
         raise HTTPException(
@@ -200,7 +199,7 @@ async def create_agent(
         name=agent.name,
         token=agent_token,
         user_id=current_user.id,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         is_active=True
     )
     db.add(db_agent)
@@ -285,7 +284,7 @@ async def validate_agent_token(token: str, db: Session = Depends(get_db)):
         return schemas.AgentTokenValidation(valid=False)
     
     # Update last_seen
-    agent.last_seen = datetime.utcnow()
+    agent.last_seen = datetime.now(timezone.utc)
     db.commit()
     
     return schemas.AgentTokenValidation(
