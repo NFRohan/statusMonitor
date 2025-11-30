@@ -36,15 +36,27 @@
 StatusMonitor is a comprehensive system monitoring solution that collects, stores, and visualizes real-time metrics from multiple machines. It features a modern React dashboard with interactive charts, WebSocket-based live updates, and historical data analysis.
 
 <p align="center">
-  <img src="screenshots/screencapture-localhost-5173-agents-1-2025-12-01-03_01_17.png" alt="Agent Dashboard" width="80%">
+  <img src="screenshots/HomePage.png" alt="Home Page" width="80%">
   <br>
-  <em>Agent Dashboard - Real-time metrics with interactive charts</em>
+  <em>User Home Page</em>
 </p>
 
 <p align="center">
-  <img src="screenshots/Screenshot 2025-12-01 030226.png" alt="user page" width="80%">
+  <img src="screenshots/dashboard.png" alt="Dashboard" width="80%">
   <br>
-  <em>User Page</em>
+  <em>Dashboard - Real-time metrics with interactive charts</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/agent Registration.png" alt="Agent Registration" width="80%">
+  <br>
+  <em>Agent Registration - Create and Register monitoring agents</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/alerts.png" alt="Alerts" width="80%">
+  <br>
+  <em>Alerts - Configure threshold-based Telegram notifications</em>
 </p>
 
 <p align="center">
