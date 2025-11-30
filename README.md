@@ -129,12 +129,16 @@ cd statusmonitor
 
 **Windows (PowerShell):**
 ```powershell
-.\start-docker.ps1
+.\start-docker.ps1              # Development mode (all ports exposed)
+# or
+.\start-docker.ps1 -Prod        # Production mode (minimal ports)
+.\start-docker.ps1 -NoBuild     # Skip build step (faster restart)
 ```
 
 **Linux/macOS:**
 ```bash
-docker-compose up -d
+docker-compose up -d                                              # Development
+docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d  # Production
 ```
 
 ### 3. Access the Dashboard
@@ -172,11 +176,27 @@ In the agent GUI:
 
 Development mode exposes all service ports for debugging:
 
+**Windows (PowerShell):**
+```powershell
+# Start services (creates .env from template if missing)
+.\start-docker.ps1
+
+# View logs
+docker-compose logs -f
+
+# Stop services (preserves data)
+.\stop-docker.ps1
+
+# Stop and remove all data
+.\stop-docker.ps1 -Clean
+```
+
+**Linux/macOS:**
 ```bash
 # Copy environment template
 cp .env.example .env
 
-# Start services (uses default development credentials)
+# Start services
 docker-compose up -d
 
 # View logs
@@ -184,6 +204,9 @@ docker-compose logs -f
 
 # Stop services
 docker-compose down
+
+# Stop and remove volumes
+docker-compose down -v
 ```
 
 **Development Ports:**
@@ -228,9 +251,17 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 #### Step 2: Deploy with Production Overrides
 
+**Windows (PowerShell):**
+```powershell
+.\start-docker.ps1 -Prod
+```
+
+**Linux/macOS:**
 ```bash
 docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
+
+> **Note**: The `docker-compose.yml` file contains all build definitions. The `docker-compose.prod.yml` is an override file that only modifies runtime settings (ports, restart policies). Images are always built from the base file.
 
 **Production Ports (minimized exposure):**
 
