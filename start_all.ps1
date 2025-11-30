@@ -1,6 +1,3 @@
-# Start Redis (assuming it's installed as a service or running, otherwise we might need to start it)
-# Write-Host "Ensure Redis is running..."
-
 # Start Auth Service
 Start-Process -FilePath "venv\Scripts\uvicorn" -ArgumentList "auth_service.main:app --reload --port 8000" -NoNewWindow
 Write-Host "Started Auth Service on port 8000"
