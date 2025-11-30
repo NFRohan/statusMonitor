@@ -62,6 +62,7 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 | **Ingestion Service** | FastAPI + Redis | Metrics collection endpoint |
 | **Distribution Service** | FastAPI + WebSocket | Real-time data broadcast |
 | **History Service** | FastAPI + InfluxDB | Time-series storage & queries |
+| **Alert Service** | FastAPI + Telegram | Threshold-based alerting |
 | **Agent** | Python + tkinter | Cross-platform metrics collector |
 
 ---
@@ -89,6 +90,12 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 - **Configurable Interval**: Adjustable metrics collection frequency
 - **Standalone Build**: Package as single executable with PyInstaller
 
+### 🔔 Alerting
+- **Telegram Notifications**: Instant alerts via Telegram bot
+- **Threshold Rules**: Configure CPU, memory, and disk thresholds per agent
+- **Cooldown Protection**: 5-minute cooldown prevents notification spam
+- **Easy Setup**: Configure via web dashboard
+
 ---
 
 ## Architecture
@@ -107,6 +114,11 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 │  │ Auth Service │  │  Ingestion   │  │ Distribution │  │   History    │ │
 │  │    :8000     │  │    :8001     │  │    :8002     │  │    :8003     │ │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘ │
+│                                                                          │
+│                           ┌──────────────┐                               │
+│                           │Alert Service │                               │
+│                           │    :8004     │───────► Telegram              │
+│                           └──────────────┘                               │
 └─────────┼─────────────────┼─────────────────┼─────────────────┼─────────┘
           │                 │                 │                 │
           ▼                 ▼                 ▼                 ▼
@@ -239,6 +251,7 @@ docker-compose down -v
 | Ingestion Service | 8001 | http://localhost:8001 |
 | Distribution Service | 8002 | http://localhost:8002 |
 | History Service | 8003 | http://localhost:8003 |
+| Alert Service | 8004 | http://localhost:8004 |
 | PostgreSQL | 5432 | localhost:5432 |
 | Redis | 6379 | localhost:6379 |
 | InfluxDB | 8086 | http://localhost:8086 |
@@ -477,6 +490,32 @@ export COLLECTION_INTERVAL=5
 | `/ws/{agent_id}` | WebSocket | Real-time metrics stream |
 | `/health` | HTTP GET | Health check |
 
+### Alert Service (`:8004`)
+
+| Endpoint | Method | Description | Auth |
+|----------|--------|-------------|------|
+| `/rules` | GET | List user's alert rules | Access Token |
+| `/rules` | POST | Create alert rule | Access Token |
+| `/rules/{id}` | DELETE | Delete alert rule | Access Token |
+| `/recipient` | GET | Get Telegram settings | Access Token |
+| `/recipient` | POST | Update Telegram settings | Access Token |
+| `/health` | GET | Health check | No |
+
+**Alert Rule Payload:**
+```json
+{
+  "agent_id": "4",
+  "metric_type": "cpu",
+  "condition": "gt",
+  "threshold": 90.0,
+  "enabled": true
+}
+```
+
+- `metric_type`: `cpu`, `memory`, or `disk`
+- `condition`: `gt` (greater than) or `lt` (less than)
+- `threshold`: Percentage value (0-100)
+
 ---
 
 ## Configuration
@@ -497,6 +536,7 @@ All configuration is via environment variables. See `.env.example` for complete 
 | `INFLUXDB_TOKEN` | (required) | InfluxDB admin token |
 | `INFLUXDB_ORG` | statusmonitor | InfluxDB organization |
 | `INFLUXDB_BUCKET` | metrics | InfluxDB bucket name |
+| `TELEGRAM_BOT_TOKEN` | (optional) | Telegram bot token for alerts |
 
 ---
 
@@ -548,6 +588,49 @@ All services expose `/health`:
 - Ingestion: http://localhost:8001/health
 - Distribution: http://localhost:8002/health
 - History: http://localhost:8003/health
+- Alert: http://localhost:8004/health
+
+---
+
+## Alerting Setup
+
+### 1. Create a Telegram Bot
+
+1. Open Telegram and search for [@BotFather](https://t.me/botfather)
+2. Send `/newbot` and follow the prompts
+3. Copy the **Bot Token** (looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+
+### 2. Configure the Token
+
+Add the token to your `.env` file:
+```env
+TELEGRAM_BOT_TOKEN=your-bot-token-here
+```
+
+Restart the alert service:
+```bash
+docker-compose up -d alert-service
+```
+
+### 3. Get Your Chat ID
+
+1. Start a chat with your new bot on Telegram
+2. Send any message to the bot
+3. Visit: `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
+4. Find your Chat ID in the response: `"chat":{"id":123456789}`
+
+Alternatively, message [@userinfobot](https://t.me/userinfobot) to get your ID.
+
+### 4. Configure Alerts in Dashboard
+
+1. Go to the **Alerts** page in the dashboard
+2. Enter your **Chat ID** and save
+3. Create alert rules:
+   - Select an agent
+   - Choose metric type (CPU, Memory, Disk)
+   - Set condition (Greater Than / Less Than)
+   - Set threshold percentage
+4. Alerts will be sent when thresholds are breached (5-minute cooldown between alerts)
 
 ---
 
@@ -570,6 +653,10 @@ statusmonitor/
 │   └── Dockerfile
 ├── history_service/        # InfluxDB integration
 │   ├── main.py
+│   └── Dockerfile
+├── alert_service/          # Telegram alerting
+│   ├── main.py
+│   ├── telegram_bot.py
 │   └── Dockerfile
 ├── ingestion_service/      # Metrics ingestion
 │   ├── main.py

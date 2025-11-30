@@ -132,6 +132,35 @@ services:
       retries: 5
     restart: unless-stopped
 
+  alert-service:
+    build:
+      context: ./alert_service
+      dockerfile: Dockerfile
+    container_name: statusmonitor-alert
+    ports:
+      - "8004:8004"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    networks:
+      - statusmonitor-network
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-statusmonitor}:${POSTGRES_PASSWORD:-statusmonitor}@postgres:5432/${POSTGRES_DB:-statusmonitor}
+      - AUTH_SERVICE_URL=http://auth-service:8000
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   influxdb:
     image: influxdb:2.7-alpine
     container_name: statusmonitor-influxdb

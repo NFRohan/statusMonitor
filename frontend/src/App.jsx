@@ -5,6 +5,7 @@ import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Agents from './pages/Agents';
 import AgentDashboard from './pages/AgentDashboard';
+import Alerts from './pages/Alerts';
 
 const ProtectedRoute = ({ children }) => {
   const { user, loading, tokens } = useAuth();
@@ -47,6 +48,14 @@ function App() {
             element={
               <ProtectedRoute>
                 <AgentDashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/alerts"
+            element={
+              <ProtectedRoute>
+                <Alerts />
               </ProtectedRoute>
             }
           />
