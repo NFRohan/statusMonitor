@@ -2,28 +2,41 @@ import time
 import requests
 import os
 import json
+import sys
 from dotenv import load_dotenv
-from . import metrics
+import metrics
 
 load_dotenv()
 
 INGESTION_URL = os.getenv("INGESTION_URL", "http://localhost:8001/ingest")
-AGENT_ID = os.getenv("AGENT_ID", "agent-1")
-INTERVAL = int(os.getenv("INTERVAL", "1"))
+AGENT_TOKEN = os.getenv("AGENT_TOKEN", "")
+INTERVAL = int(os.getenv("INTERVAL", "5"))
 
 def main():
-    print(f"Starting Agent {AGENT_ID}...")
+    if not AGENT_TOKEN:
+        print("ERROR: AGENT_TOKEN environment variable is required!")
+        print("Please set your agent token in a .env file or environment variable.")
+        print("You can get a token from the StatusMonitor web interface.")
+        sys.exit(1)
+    
+    print(f"Starting Agent...")
     print(f"Sending metrics to {INGESTION_URL} every {INTERVAL} seconds.")
+    
+    headers = {
+        "Content-Type": "application/json",
+        "X-Agent-Token": AGENT_TOKEN
+    }
     
     while True:
         try:
             data = metrics.collect_all_metrics()
-            data["agent_id"] = AGENT_ID
             
-            # print(json.dumps(data, indent=2)) # Debug
-            
-            response = requests.post(INGESTION_URL, json=data, timeout=2)
-            if response.status_code != 200:
+            response = requests.post(INGESTION_URL, json=data, headers=headers, timeout=5)
+            if response.status_code == 200:
+                print(f"[{time.strftime('%H:%M:%S')}] Metrics sent successfully")
+            elif response.status_code == 401:
+                print(f"ERROR: Invalid agent token. Please check your AGENT_TOKEN.")
+            else:
                 print(f"Error sending metrics: {response.status_code} - {response.text}")
             
         except requests.exceptions.ConnectionError:

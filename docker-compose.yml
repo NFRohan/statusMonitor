@@ -1,0 +1,94 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: statusmonitor-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - statusmonitor-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  auth-service:
+    build:
+      context: ./auth_service
+      dockerfile: Dockerfile
+    container_name: statusmonitor-auth
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./auth.db:/app/auth.db
+    networks:
+      - statusmonitor-network
+    environment:
+      - DATABASE_URL=sqlite:///./auth.db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ingestion-service:
+    build:
+      context: ./ingestion_service
+      dockerfile: Dockerfile
+    container_name: statusmonitor-ingestion
+    ports:
+      - "8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - statusmonitor-network
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - AUTH_SERVICE_URL=http://auth-service:8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  distribution-service:
+    build:
+      context: ./distribution_service
+      dockerfile: Dockerfile
+    container_name: statusmonitor-distribution
+    ports:
+      - "8002:8002"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - statusmonitor-network
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: statusmonitor-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - auth-service
+      - distribution-service
+    networks:
+      - statusmonitor-network
+
+networks:
+  statusmonitor-network:
+    driver: bridge
