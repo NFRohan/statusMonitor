@@ -1,11 +1,31 @@
-version: '3.8'
-
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: statusmonitor-postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - statusmonitor-network
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-statusmonitor}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-statusmonitor}
+      - POSTGRES_DB=${POSTGRES_DB:-statusmonitor}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-statusmonitor} -d ${POSTGRES_DB:-statusmonitor}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     container_name: statusmonitor-redis
     ports:
       - "6379:6379"
+    volumes:
+      - redis-data:/data
     networks:
       - statusmonitor-network
     healthcheck:
@@ -13,6 +33,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   auth-service:
     build:
@@ -21,17 +42,20 @@ services:
     container_name: statusmonitor-auth
     ports:
       - "8000:8000"
-    volumes:
-      - ./auth.db:/app/auth.db
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - statusmonitor-network
     environment:
-      - DATABASE_URL=sqlite:///./auth.db
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-statusmonitor}:${POSTGRES_PASSWORD:-statusmonitor}@postgres:5432/${POSTGRES_DB:-statusmonitor}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   ingestion-service:
     build:
@@ -42,6 +66,8 @@ services:
       - "8001:8001"
     depends_on:
       redis:
+        condition: service_healthy
+      auth-service:
         condition: service_healthy
     networks:
       - statusmonitor-network
@@ -54,6 +80,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   distribution-service:
     build:
@@ -75,6 +102,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   history-service:
     build:
@@ -94,14 +122,15 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - INFLUXDB_URL=http://influxdb:8086
-      - INFLUXDB_TOKEN=statusmonitor-secret-token
-      - INFLUXDB_ORG=statusmonitor
-      - INFLUXDB_BUCKET=metrics
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-statusmonitor-secret-token}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-statusmonitor}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-metrics}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   influxdb:
     image: influxdb:2.7-alpine
@@ -115,16 +144,17 @@ services:
       - statusmonitor-network
     environment:
       - DOCKER_INFLUXDB_INIT_MODE=setup
-      - DOCKER_INFLUXDB_INIT_USERNAME=admin
-      - DOCKER_INFLUXDB_INIT_PASSWORD=statusmonitor123
-      - DOCKER_INFLUXDB_INIT_ORG=statusmonitor
-      - DOCKER_INFLUXDB_INIT_BUCKET=metrics
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=statusmonitor-secret-token
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_ADMIN_USER:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_ADMIN_PASSWORD:-statusmonitor123}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG:-statusmonitor}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET:-metrics}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN:-statusmonitor-secret-token}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   frontend:
     build:
@@ -136,10 +166,14 @@ services:
     depends_on:
       - auth-service
       - distribution-service
+      - history-service
     networks:
       - statusmonitor-network
+    restart: unless-stopped
 
 volumes:
+  postgres-data:
+  redis-data:
   influxdb-data:
   influxdb-config:
 

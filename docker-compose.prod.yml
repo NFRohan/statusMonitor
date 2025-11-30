@@ -1,0 +1,30 @@
+# Production overrides for docker-compose
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  postgres:
+    ports: []  # Don't expose in production
+
+  redis:
+    ports: []  # Don't expose in production
+
+  influxdb:
+    ports: []  # Don't expose in production
+
+  auth-service:
+    ports: []  # Only accessible via frontend proxy
+
+  ingestion-service:
+    ports:
+      - "8001:8001"  # Keep exposed for external agents
+
+  distribution-service:
+    ports: []  # Only accessible via frontend proxy
+
+  history-service:
+    ports: []  # Only accessible via frontend proxy
+
+  frontend:
+    ports:
+      - "80:80"
+      - "443:443"

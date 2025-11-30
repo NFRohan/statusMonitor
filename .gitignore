@@ -49,3 +49,7 @@ test_*.py
 # Logs
 *.log
 logs/
+
+# Docker volumes (local development)
+postgres-data/
+redis-data/
