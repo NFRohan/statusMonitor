@@ -139,7 +139,7 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/statusmonitor.git
+git clone https://github.com/NFRohan/statusmonitor.git
 cd statusmonitor
 ```
 
@@ -331,16 +331,39 @@ python agent_service/gui_agent.py
 
 ### Building Standalone Executable (Windows)
 
+**Using the build script:**
 ```powershell
-# Build with PyInstaller
+# Build with PyInstaller (recommended)
 .\build_agent.ps1
 
 # Output: dist/StatusMonitorAgent.exe
 ```
 
+**Manual build steps:**
+```powershell
+# 1. Create and activate virtual environment
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+
+# 2. Install dependencies
+pip install -r agent_service/requirements-gui.txt
+pip install pyinstaller
+
+# 3. Build the executable
+pyinstaller --onefile --windowed --name StatusMonitorAgent agent_service/gui_agent.py
+
+# 4. (Optional) Add custom icon
+pyinstaller --onefile --windowed --name StatusMonitorAgent --icon agent_service/icon.ico agent_service/gui_agent.py
+```
+
+The executable will be created at `dist/StatusMonitorAgent.exe`. This is a standalone file that can be distributed to other Windows machines without requiring Python to be installed.
+
 ### Agent Configuration
 
 The agent stores configuration in `~/.statusmonitor/agent_config.json`:
+
+- **Windows**: `C:\Users\<username>\.statusmonitor\agent_config.json`
+- **Linux/macOS**: `~/.statusmonitor/agent_config.json`
 
 ```json
 {
