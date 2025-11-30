@@ -1,11 +1,14 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, status
 import redis.asyncio as redis
 import asyncio
 import os
 import json
+import httpx
 from typing import Dict, Set, Optional
 
 app = FastAPI()
+
+AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth-service:8000")
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,6 +23,23 @@ app.add_middleware(
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_CHANNEL_PREFIX = "metrics:"
+
+async def validate_token(token: str) -> Optional[dict]:
+    """Validate JWT token with auth service and return user info"""
+    if not token:
+        return None
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{AUTH_SERVICE_URL}/users/me",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=5.0
+            )
+            if response.status_code == 200:
+                return response.json()
+    except Exception as e:
+        print(f"Token validation error: {e}")
+    return None
 
 class ConnectionManager:
     def __init__(self):
@@ -66,28 +86,32 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 async def redis_subscriber():
-    """Subscribe to all user channels and distribute messages"""
-    try:
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
-        pubsub = r.pubsub()
-        
-        # Use pattern subscription to listen to all metrics:* channels
-        await pubsub.psubscribe(f"{REDIS_CHANNEL_PREFIX}*")
-        print(f"Subscribed to Redis pattern: {REDIS_CHANNEL_PREFIX}*")
+    """Subscribe to all user channels and distribute messages with auto-reconnect"""
+    while True:
+        try:
+            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+            pubsub = r.pubsub()
+            
+            # Use pattern subscription to listen to all metrics:* channels
+            await pubsub.psubscribe(f"{REDIS_CHANNEL_PREFIX}*")
+            print(f"Subscribed to Redis pattern: {REDIS_CHANNEL_PREFIX}*")
 
-        async for message in pubsub.listen():
-            if message["type"] == "pmessage":
-                # Extract user_id from channel name (metrics:{user_id})
-                channel = message["channel"]
-                try:
-                    user_id = int(channel.split(":")[-1])
-                    data = json.loads(message["data"])
-                    agent_id = data.get("agent_id")
-                    await manager.send_to_user(user_id, message["data"], agent_id)
-                except (ValueError, json.JSONDecodeError) as e:
-                    print(f"Error processing message: {e}")
-    except Exception as e:
-        print(f"Redis subscriber error: {e}")
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message is not None and message["type"] == "pmessage":
+                    # Extract user_id from channel name (metrics:{user_id})
+                    channel = message["channel"]
+                    try:
+                        user_id = int(channel.split(":")[-1])
+                        data = json.loads(message["data"])
+                        agent_id = data.get("agent_id")
+                        await manager.send_to_user(user_id, message["data"], agent_id)
+                    except (ValueError, json.JSONDecodeError) as e:
+                        print(f"Error processing message: {e}")
+                await asyncio.sleep(0.01)  # Small delay to prevent busy loop
+        except Exception as e:
+            print(f"Redis subscriber error: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
 
 @app.on_event("startup")
 async def startup_event():
@@ -96,14 +120,21 @@ async def startup_event():
 @app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    user_id: int = Query(...),
+    token: str = Query(...),
     agent_id: Optional[int] = Query(None)
 ):
     """
     WebSocket endpoint for receiving metrics.
-    - user_id: Required, the user ID to receive metrics for
+    - token: Required, JWT access token for authentication
     - agent_id: Optional, filter to only receive metrics from a specific agent
     """
+    # Validate token before accepting connection
+    user = await validate_token(token)
+    if not user:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    
+    user_id = user["id"]
     await manager.connect(websocket, user_id, agent_id)
     try:
         while True:

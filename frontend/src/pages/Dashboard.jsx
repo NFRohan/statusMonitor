@@ -5,7 +5,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Responsi
 import { LogOut, Activity, HardDrive, Cpu, Network } from 'lucide-react';
 
 const Dashboard = () => {
-    const { user, logout } = useAuth();
+    const { user, logout, tokens } = useAuth();
     const [metrics, setMetrics] = useState(null);
     const [history, setHistory] = useState([]);
 
@@ -15,10 +15,10 @@ const Dashboard = () => {
     }
 
     useEffect(() => {
-        if (!user) return;
+        if (!user || !tokens?.access_token) return;
         
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?user_id=${user.id}`);
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?token=${tokens.access_token}`);
 
         ws.onmessage = (event) => {
             try {

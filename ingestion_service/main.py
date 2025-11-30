@@ -72,12 +72,15 @@ async def ingest_metrics(
     data["user_id"] = token_info["user_id"]
     
     # Publish to user-specific Redis channel
-    if redis_client:
-        try:
-            user_channel = f"{REDIS_CHANNEL_PREFIX}{token_info['user_id']}"
-            redis_client.publish(user_channel, json.dumps(data))
-        except redis.ConnectionError:
-            print("Error publishing to Redis")
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Metrics storage unavailable")
+    
+    try:
+        user_channel = f"{REDIS_CHANNEL_PREFIX}{token_info['user_id']}"
+        redis_client.publish(user_channel, json.dumps(data))
+    except redis.ConnectionError as e:
+        print(f"Error publishing to Redis: {e}")
+        raise HTTPException(status_code=503, detail="Failed to store metrics")
             
     return {"status": "received"}
 

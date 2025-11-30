@@ -3,3 +3,4 @@ uvicorn
 redis
 influxdb-client
 python-dotenv
+httpx

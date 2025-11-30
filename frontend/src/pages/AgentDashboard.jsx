@@ -67,9 +67,15 @@ const AgentDashboard = () => {
             const interval = intervalMap[timeRange] || '1m';
             
             const [cpuRes, memRes, summaryRes] = await Promise.all([
-                axios.get(`/api/history/${agentId}/cpu?start=${timeRange}&interval=${interval}`),
-                axios.get(`/api/history/${agentId}/memory?start=${timeRange}&interval=${interval}`),
-                axios.get(`/api/history/${agentId}/summary?start=${timeRange}`)
+                axios.get(`/api/history/${agentId}/cpu?start=${timeRange}&interval=${interval}`, {
+                    headers: { Authorization: `Bearer ${tokens.access_token}` }
+                }),
+                axios.get(`/api/history/${agentId}/memory?start=${timeRange}&interval=${interval}`, {
+                    headers: { Authorization: `Bearer ${tokens.access_token}` }
+                }),
+                axios.get(`/api/history/${agentId}/summary?start=${timeRange}`, {
+                    headers: { Authorization: `Bearer ${tokens.access_token}` }
+                })
             ]);
             
             setHistoricalCpu(cpuRes.data.data.map(d => ({
@@ -98,11 +104,11 @@ const AgentDashboard = () => {
 
     // WebSocket connection for real-time metrics
     useEffect(() => {
-        if (!user) return;
+        if (!user || !tokens?.access_token) return;
 
         // Use relative WebSocket URL through nginx proxy
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${wsProtocol}//${window.location.host}/ws?user_id=${user.id}&agent_id=${agentId}`;
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws?token=${tokens.access_token}&agent_id=${agentId}`;
         console.log('Connecting to WebSocket:', wsUrl);
         const ws = new WebSocket(wsUrl);
 
@@ -212,8 +218,6 @@ const AgentDashboard = () => {
             
             if (timeSinceLastSeen < 10000) { // Less than 10 seconds
                 setAgentStatus('active');
-            } else if (timeSinceLastSeen < 30000) { // Less than 30 seconds
-                setAgentStatus('idle');
             } else {
                 setAgentStatus('offline');
             }

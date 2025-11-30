@@ -82,7 +82,7 @@ def refresh_caches():
 def check_metrics(data):
     """Evaluate metrics against rules"""
     agent_id = str(data.get("agent_id"))
-    user_id = data.get("user_id")
+    data_user_id = data.get("user_id")
     
     if agent_id not in RULES_CACHE:
         return
@@ -90,6 +90,10 @@ def check_metrics(data):
     rules = RULES_CACHE[agent_id]
     
     for rule in rules:
+        # Security check: ensure rule belongs to the same user as the metrics data
+        if rule["user_id"] != data_user_id:
+            continue
+        
         # Check cooldown
         last_triggered = COOLDOWN_TRACKER.get(rule["id"], 0)
         if time.time() - last_triggered < COOLDOWN_SECONDS:
@@ -133,23 +137,30 @@ def check_metrics(data):
                     # db.close()
 
 def redis_listener():
-    """Background task to listen for metrics"""
-    try:
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-        pubsub = r.pubsub()
-        pubsub.psubscribe("metrics:*")
-        
-        print("Started Redis listener for alerts")
-        
-        for message in pubsub.listen():
-            if message["type"] == "pmessage":
-                try:
-                    data = json.loads(message["data"])
-                    check_metrics(data)
-                except Exception as e:
-                    pass  # Silently ignore malformed messages
-    except Exception as e:
-        print(f"Redis listener failed: {e}")
+    """Background task to listen for metrics with auto-reconnect"""
+    backoff = 1
+    max_backoff = 60
+    
+    while True:
+        try:
+            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+            pubsub = r.pubsub()
+            pubsub.psubscribe("metrics:*")
+            
+            print("Started Redis listener for alerts")
+            backoff = 1  # Reset backoff on successful connection
+            
+            for message in pubsub.listen():
+                if message["type"] == "pmessage":
+                    try:
+                        data = json.loads(message["data"])
+                        check_metrics(data)
+                    except Exception as e:
+                        pass  # Silently ignore malformed messages
+        except Exception as e:
+            print(f"Redis listener error: {e}. Reconnecting in {backoff} seconds...")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)  # Exponential backoff
 
 @app.on_event("startup")
 async def startup_event():
@@ -177,6 +188,20 @@ def create_rule(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(database.get_db)
 ):
+    # Verify agent ownership via auth service
+    try:
+        response = requests.get(
+            f"{AUTH_SERVICE_URL}/agents/{rule.agent_id}",
+            headers={"Authorization": f"Bearer {current_user.get('_token', '')}"}
+        )
+        # If auth service returns 404 or agent doesn't belong to user, reject
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Agent not found or does not belong to you")
+    except requests.RequestException:
+        # If auth service is unreachable, allow creation (degraded mode)
+        # In production, you might want to fail closed instead
+        pass
+    
     db_rule = models.AlertRule(**rule.dict(), user_id=current_user["id"])
     db.add(db_rule)
     db.commit()
