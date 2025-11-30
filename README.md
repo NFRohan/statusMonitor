@@ -79,6 +79,8 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 - **JWT Authentication**: Secure token-based auth with refresh tokens
 - **Argon2 Password Hashing**: Industry-standard password security
 - **Per-Agent Tokens**: Isolated access tokens for each monitoring agent
+- **Token Expiration**: 5-minute activation window prevents token reuse/theft
+- **One-Time Activation**: Tokens become permanent only after first successful connection
 
 ### 📊 Agent
 - **Cross-Platform**: Windows, Linux, and macOS support
@@ -169,6 +171,7 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 2. Log in to the dashboard
 3. Navigate to **Agents** page
 4. Click **Create Agent** and copy the generated token
+5. **Note**: Token expires in 5 minutes - use it promptly or regenerate
 
 ### 5. Run the Agent
 
@@ -405,6 +408,8 @@ export COLLECTION_INTERVAL=5
 | `/agents` | GET | List user's agents | Access Token |
 | `/agents` | POST | Create new agent | Access Token |
 | `/agents/{id}` | DELETE | Delete an agent | Access Token |
+| `/agents/{id}/regenerate-token` | POST | Regenerate agent token | Access Token |
+| `/agents/validate-token` | POST | Validate agent token | Agent Token |
 | `/health` | GET | Health check | No |
 
 ### Ingestion Service (`:8001`)
@@ -521,9 +526,10 @@ docker exec -it statusmonitor-postgres psql -U statusmonitor
 ### Agent Can't Connect
 
 1. Verify ingestion service is running: `curl http://localhost:8001/health`
-2. Check agent token is valid
-3. Verify firewall allows connection to port 8001
-4. Check agent logs in GUI console
+2. Check agent token is valid and not expired (5-minute window for new tokens)
+3. If token expired, regenerate from the Agents page in dashboard
+4. Verify firewall allows connection to port 8001
+5. Check agent logs in GUI console
 
 ### Reset All Data
 
