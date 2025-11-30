@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useParams, Link } from 'react-router-dom';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area } from 'recharts';
-import { ArrowLeft, Activity, HardDrive, Cpu, Network, Clock, History, TrendingUp, AlertTriangle, CheckCircle, XCircle, X, Zap } from 'lucide-react';
+import { ArrowLeft, Activity, HardDrive, Cpu, Network, Clock, History, TrendingUp, AlertTriangle, CheckCircle, XCircle, X, Zap, ArrowUp, ArrowDown, Download } from 'lucide-react';
 import axios from 'axios';
 
 const AgentDashboard = () => {
@@ -445,6 +445,61 @@ const AgentDashboard = () => {
                                                 <dt className="text-sm font-medium text-gray-500 truncate">Network Sent</dt>
                                                 <dd className="text-lg font-medium text-gray-900">
                                                     {formatBytes(metrics.network?.bytes_sent)}
+                                                </dd>
+                                            </dl>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Network Cards Row */}
+                        <div className="grid grid-cols-1 gap-6 sm:grid-cols-3 mb-8">
+                            <div className="bg-white overflow-hidden shadow rounded-lg">
+                                <div className="p-5">
+                                    <div className="flex items-center">
+                                        <div className="flex-shrink-0">
+                                            <Download className="h-6 w-6 text-green-500" />
+                                        </div>
+                                        <div className="ml-5 w-0 flex-1">
+                                            <dl>
+                                                <dt className="text-sm font-medium text-gray-500 truncate">Network Received</dt>
+                                                <dd className="text-lg font-medium text-gray-900">
+                                                    {formatBytes(metrics.network?.bytes_recv)}
+                                                </dd>
+                                            </dl>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="bg-white overflow-hidden shadow rounded-lg">
+                                <div className="p-5">
+                                    <div className="flex items-center">
+                                        <div className="flex-shrink-0">
+                                            <ArrowUp className="h-6 w-6 text-blue-500" />
+                                        </div>
+                                        <div className="ml-5 w-0 flex-1">
+                                            <dl>
+                                                <dt className="text-sm font-medium text-gray-500 truncate">Upload Speed</dt>
+                                                <dd className="text-lg font-medium text-gray-900">
+                                                    {formatBytes(networkHistory.length > 1 ? networkHistory[networkHistory.length - 1]?.sendRate || 0 : 0)}/s
+                                                </dd>
+                                            </dl>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="bg-white overflow-hidden shadow rounded-lg">
+                                <div className="p-5">
+                                    <div className="flex items-center">
+                                        <div className="flex-shrink-0">
+                                            <ArrowDown className="h-6 w-6 text-purple-500" />
+                                        </div>
+                                        <div className="ml-5 w-0 flex-1">
+                                            <dl>
+                                                <dt className="text-sm font-medium text-gray-500 truncate">Download Speed</dt>
+                                                <dd className="text-lg font-medium text-gray-900">
+                                                    {formatBytes(networkHistory.length > 1 ? networkHistory[networkHistory.length - 1]?.recvRate || 0 : 0)}/s
                                                 </dd>
                                             </dl>
                                         </div>
