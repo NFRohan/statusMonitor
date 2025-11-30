@@ -94,6 +94,10 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 - **Per-Agent Tokens**: Isolated access tokens for each monitoring agent
 - **Token Expiration**: 5-minute activation window prevents token reuse/theft
 - **One-Time Activation**: Tokens become permanent only after first successful connection
+- **WebSocket Authentication**: Real-time connections require valid JWT tokens
+- **Data Isolation**: Users can only access their own agents' metrics and history
+- **Alert Rule Ownership**: Alert rules and notifications are scoped to the owning user
+- **Resilient Connections**: Automatic reconnection with exponential backoff for Redis pub/sub
 
 ### 📊 Agent
 - **Cross-Platform**: Windows, Linux, and macOS support
@@ -479,14 +483,16 @@ export COLLECTION_INTERVAL=5
 
 ### History Service (`:8003`)
 
-| Endpoint | Method | Description | Params |
-|----------|--------|-------------|--------|
-| `/history/{agent_id}/cpu` | GET | CPU history | `start`, `stop` |
-| `/history/{agent_id}/memory` | GET | Memory history | `start`, `stop` |
-| `/history/{agent_id}/disk` | GET | Disk history | `start`, `stop` |
-| `/history/{agent_id}/network` | GET | Network history | `start`, `stop` |
-| `/history/{agent_id}/summary` | GET | Summary stats | `start`, `stop` |
-| `/health` | GET | Health check | - |
+| Endpoint | Method | Description | Auth |
+|----------|--------|-------------|------|
+| `/history/{agent_id}/cpu` | GET | CPU history | Access Token |
+| `/history/{agent_id}/memory` | GET | Memory history | Access Token |
+| `/history/{agent_id}/disk` | GET | Disk history | Access Token |
+| `/history/{agent_id}/network` | GET | Network history | Access Token |
+| `/history/{agent_id}/summary` | GET | Summary stats | Access Token |
+| `/health` | GET | Health check | No |
+
+> **Note**: All history endpoints require JWT authentication and verify that the requested agent belongs to the authenticated user.
 
 **Time Range Parameters:**
 - `-5m` - Last 5 minutes
@@ -497,10 +503,12 @@ export COLLECTION_INTERVAL=5
 
 ### Distribution Service (`:8002`)
 
-| Endpoint | Protocol | Description |
-|----------|----------|-------------|
-| `/ws/{agent_id}` | WebSocket | Real-time metrics stream |
-| `/health` | HTTP GET | Health check |
+| Endpoint | Protocol | Description | Auth |
+|----------|----------|-------------|------|
+| `/ws/{agent_id}?token=<jwt>` | WebSocket | Real-time metrics stream | Access Token (query param) |
+| `/health` | HTTP GET | Health check | No |
+
+> **Note**: WebSocket connections require a valid JWT access token passed as a `token` query parameter. The service validates ownership of the requested agent before establishing the connection.
 
 ### Alert Service (`:8004`)
 
@@ -512,6 +520,11 @@ export COLLECTION_INTERVAL=5
 | `/recipient` | GET | Get Telegram settings | Access Token |
 | `/recipient` | POST | Update Telegram settings | Access Token |
 | `/health` | GET | Health check | No |
+
+> **Security Notes**:
+> - Alert rules can only be created for agents owned by the authenticated user
+> - Metric threshold checks verify agent ownership before triggering alerts
+> - 5-minute cooldown between repeated alerts prevents notification spam
 
 **Alert Rule Payload:**
 ```json
