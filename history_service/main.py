@@ -5,9 +5,10 @@ import asyncio
 import os
 import json
 import httpx
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
-from influxdb_client import InfluxDBClient, Point
+from influxdb_client import InfluxDBClient, Point, BucketRetentionRules
 from influxdb_client.client.write_api import SYNCHRONOUS
 from pydantic import BaseModel
 
@@ -32,12 +33,285 @@ KAFKA_GROUP_ID = "history-service"
 INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
 INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "statusmonitor-token")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "statusmonitor")
-INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "metrics")
+
+# Bucket names for different retention tiers
+BUCKET_RAW = "metrics_raw"      # 5-second resolution, 24-hour retention
+BUCKET_1M = "metrics_1m"        # 1-minute resolution, 7-day retention
+BUCKET_1H = "metrics_1h"        # 1-hour resolution, 365-day retention
+BUCKET_LEGACY = "metrics"       # Legacy bucket (backward compatibility)
 
 # InfluxDB client
 influx_client = None
 write_api = None
 query_api = None
+buckets_api = None
+tasks_api = None
+
+# Bucket configurations for downsampling
+BUCKET_CONFIGS = {
+    BUCKET_RAW: {
+        "retention_seconds": 24 * 60 * 60,  # 24 hours
+        "description": "Raw metrics at 5-second resolution"
+    },
+    BUCKET_1M: {
+        "retention_seconds": 7 * 24 * 60 * 60,  # 7 days
+        "description": "1-minute aggregated metrics"
+    },
+    BUCKET_1H: {
+        "retention_seconds": 365 * 24 * 60 * 60,  # 1 year
+        "description": "1-hour aggregated metrics"
+    }
+}
+
+
+def parse_duration_to_seconds(duration: str) -> int:
+    """Parse InfluxDB duration string to seconds"""
+    if not duration.startswith("-"):
+        return 3600  # Default 1 hour
+    
+    time_str = duration[1:]  # Remove leading '-'
+    
+    # Match patterns like "1h", "24h", "7d", "30d", "1mo", "1y"
+    match = re.match(r'^(\d+)(s|m|h|d|w|mo|y)$', time_str)
+    if not match:
+        return 3600
+    
+    value = int(match.group(1))
+    unit = match.group(2)
+    
+    multipliers = {
+        's': 1,
+        'm': 60,
+        'h': 3600,
+        'd': 86400,
+        'w': 604800,
+        'mo': 2592000,  # ~30 days
+        'y': 31536000   # ~365 days
+    }
+    
+    return value * multipliers.get(unit, 3600)
+
+
+def get_bucket_for_time_range(start: str) -> tuple:
+    """
+    Determine the appropriate bucket based on time range.
+    
+    Returns:
+        tuple: (bucket_name, field_suffix, recommended_interval)
+        - field_suffix is empty for raw/1m data, "_avg" for 1h aggregated data
+    """
+    seconds = parse_duration_to_seconds(start)
+    
+    # Bucket selection logic:
+    # <= 24 hours: Use raw data (metrics_raw) - highest resolution
+    # <= 7 days: Use 1-minute data (metrics_1m) - medium resolution  
+    # > 7 days: Use 1-hour data (metrics_1h) - long-term storage
+    
+    if seconds <= 24 * 3600:  # <= 24 hours
+        return BUCKET_RAW, "", "1m"
+    elif seconds <= 7 * 24 * 3600:  # <= 7 days
+        return BUCKET_1M, "", "5m"
+    else:  # > 7 days
+        return BUCKET_1H, "_avg", "1h"
+
+
+def setup_buckets_and_tasks():
+    """Set up InfluxDB buckets and downsampling tasks"""
+    global buckets_api, tasks_api
+    
+    try:
+        buckets_api = influx_client.buckets_api()
+        tasks_api = influx_client.tasks_api()
+        orgs_api = influx_client.organizations_api()
+        
+        # Get org ID
+        orgs = orgs_api.find_organizations(org=INFLUXDB_ORG)
+        if not orgs:
+            print(f"Organization '{INFLUXDB_ORG}' not found!")
+            return False
+        org_id = orgs[0].id
+        
+        # Create buckets
+        for bucket_name, config in BUCKET_CONFIGS.items():
+            existing = buckets_api.find_bucket_by_name(bucket_name)
+            if existing:
+                print(f"  Bucket '{bucket_name}' exists, updating retention...")
+                existing.retention_rules = [
+                    BucketRetentionRules(
+                        type="expire",
+                        every_seconds=config["retention_seconds"]
+                    )
+                ]
+                buckets_api.update_bucket(bucket=existing)
+            else:
+                print(f"  Creating bucket '{bucket_name}'...")
+                buckets_api.create_bucket(
+                    bucket_name=bucket_name,
+                    retention_rules=[
+                        BucketRetentionRules(
+                            type="expire",
+                            every_seconds=config["retention_seconds"]
+                        )
+                    ],
+                    org_id=org_id,
+                    description=config["description"]
+                )
+        
+        # Create downsampling tasks
+        create_downsampling_tasks(org_id)
+        
+        print("InfluxDB buckets and tasks configured!")
+        return True
+        
+    except Exception as e:
+        print(f"Error setting up buckets: {e}")
+        return False
+
+
+def create_downsampling_tasks(org_id: str):
+    """Create InfluxDB tasks for downsampling data"""
+    
+    # Task: Raw (5s) -> 1 minute
+    task_raw_to_1m = f'''
+option task = {{name: "downsample_raw_to_1m", every: 1m}}
+
+// CPU metrics
+from(bucket: "{BUCKET_RAW}")
+    |> range(start: -2m)
+    |> filter(fn: (r) => r["_measurement"] == "cpu")
+    |> filter(fn: (r) => r["_field"] == "usage_percent")
+    |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
+    |> to(bucket: "{BUCKET_1M}", org: "{INFLUXDB_ORG}")
+
+// Memory metrics
+from(bucket: "{BUCKET_RAW}")
+    |> range(start: -2m)
+    |> filter(fn: (r) => r["_measurement"] == "memory")
+    |> filter(fn: (r) => r["_field"] == "used_percent")
+    |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
+    |> to(bucket: "{BUCKET_1M}", org: "{INFLUXDB_ORG}")
+
+// Disk metrics
+from(bucket: "{BUCKET_RAW}")
+    |> range(start: -2m)
+    |> filter(fn: (r) => r["_measurement"] == "disk")
+    |> filter(fn: (r) => r["_field"] == "percent")
+    |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
+    |> to(bucket: "{BUCKET_1M}", org: "{INFLUXDB_ORG}")
+
+// Network bytes
+from(bucket: "{BUCKET_RAW}")
+    |> range(start: -2m)
+    |> filter(fn: (r) => r["_measurement"] == "network")
+    |> filter(fn: (r) => r["_field"] == "bytes_sent" or r["_field"] == "bytes_recv")
+    |> aggregateWindow(every: 1m, fn: last, createEmpty: false)
+    |> to(bucket: "{BUCKET_1M}", org: "{INFLUXDB_ORG}")
+'''
+
+    # Task: 1 minute -> 1 hour (with min/max/avg)
+    task_1m_to_1h = f'''
+option task = {{name: "downsample_1m_to_1h", every: 1h}}
+
+// CPU avg
+from(bucket: "{BUCKET_1M}")
+    |> range(start: -2h)
+    |> filter(fn: (r) => r["_measurement"] == "cpu")
+    |> filter(fn: (r) => r["_field"] == "usage_percent")
+    |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+    |> set(key: "_field", value: "usage_percent_avg")
+    |> to(bucket: "{BUCKET_1H}", org: "{INFLUXDB_ORG}")
+
+// CPU max
+from(bucket: "{BUCKET_1M}")
+    |> range(start: -2h)
+    |> filter(fn: (r) => r["_measurement"] == "cpu")
+    |> filter(fn: (r) => r["_field"] == "usage_percent")
+    |> aggregateWindow(every: 1h, fn: max, createEmpty: false)
+    |> set(key: "_field", value: "usage_percent_max")
+    |> to(bucket: "{BUCKET_1H}", org: "{INFLUXDB_ORG}")
+
+// CPU min
+from(bucket: "{BUCKET_1M}")
+    |> range(start: -2h)
+    |> filter(fn: (r) => r["_measurement"] == "cpu")
+    |> filter(fn: (r) => r["_field"] == "usage_percent")
+    |> aggregateWindow(every: 1h, fn: min, createEmpty: false)
+    |> set(key: "_field", value: "usage_percent_min")
+    |> to(bucket: "{BUCKET_1H}", org: "{INFLUXDB_ORG}")
+
+// Memory avg
+from(bucket: "{BUCKET_1M}")
+    |> range(start: -2h)
+    |> filter(fn: (r) => r["_measurement"] == "memory")
+    |> filter(fn: (r) => r["_field"] == "used_percent")
+    |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+    |> set(key: "_field", value: "used_percent_avg")
+    |> to(bucket: "{BUCKET_1H}", org: "{INFLUXDB_ORG}")
+
+// Memory max
+from(bucket: "{BUCKET_1M}")
+    |> range(start: -2h)
+    |> filter(fn: (r) => r["_measurement"] == "memory")
+    |> filter(fn: (r) => r["_field"] == "used_percent")
+    |> aggregateWindow(every: 1h, fn: max, createEmpty: false)
+    |> set(key: "_field", value: "used_percent_max")
+    |> to(bucket: "{BUCKET_1H}", org: "{INFLUXDB_ORG}")
+
+// Disk avg
+from(bucket: "{BUCKET_1M}")
+    |> range(start: -2h)
+    |> filter(fn: (r) => r["_measurement"] == "disk")
+    |> filter(fn: (r) => r["_field"] == "percent")
+    |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+    |> set(key: "_field", value: "percent_avg")
+    |> to(bucket: "{BUCKET_1H}", org: "{INFLUXDB_ORG}")
+
+// Network bytes
+from(bucket: "{BUCKET_1M}")
+    |> range(start: -2h)
+    |> filter(fn: (r) => r["_measurement"] == "network")
+    |> filter(fn: (r) => r["_field"] == "bytes_sent" or r["_field"] == "bytes_recv")
+    |> aggregateWindow(every: 1h, fn: last, createEmpty: false)
+    |> to(bucket: "{BUCKET_1H}", org: "{INFLUXDB_ORG}")
+'''
+
+    try:
+        existing_tasks = tasks_api.find_tasks()
+        task_names = {t.name: t for t in existing_tasks}
+        
+        # Create/update raw -> 1m task
+        if "downsample_raw_to_1m" in task_names:
+            print("  Updating task 'downsample_raw_to_1m'...")
+            task = task_names["downsample_raw_to_1m"]
+            task.flux = task_raw_to_1m
+            tasks_api.update_task(task)
+        else:
+            print("  Creating task 'downsample_raw_to_1m'...")
+            tasks_api.create_task_every(
+                name="downsample_raw_to_1m",
+                flux=task_raw_to_1m,
+                every="1m",
+                org_id=org_id
+            )
+        
+        # Create/update 1m -> 1h task
+        if "downsample_1m_to_1h" in task_names:
+            print("  Updating task 'downsample_1m_to_1h'...")
+            task = task_names["downsample_1m_to_1h"]
+            task.flux = task_1m_to_1h
+            tasks_api.update_task(task)
+        else:
+            print("  Creating task 'downsample_1m_to_1h'...")
+            tasks_api.create_task_every(
+                name="downsample_1m_to_1h",
+                flux=task_1m_to_1h,
+                every="1h",
+                org_id=org_id
+            )
+            
+    except Exception as e:
+        print(f"Error creating tasks: {e}")
+
 
 def init_influxdb():
     global influx_client, write_api, query_api
@@ -50,6 +324,10 @@ def init_influxdb():
         write_api = influx_client.write_api(write_options=SYNCHRONOUS)
         query_api = influx_client.query_api()
         print(f"Connected to InfluxDB at {INFLUXDB_URL}")
+        
+        # Set up buckets and downsampling tasks
+        setup_buckets_and_tasks()
+        
         return True
     except Exception as e:
         print(f"Failed to connect to InfluxDB: {e}")
@@ -133,8 +411,8 @@ def store_metrics(data: dict):
                 .time(timestamp)
             points.append(point)
         
-        # Write all points
-        write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=points)
+        # Write all points to the RAW bucket (highest resolution, shortest retention)
+        write_api.write(bucket=BUCKET_RAW, org=INFLUXDB_ORG, record=points)
         
     except Exception as e:
         print(f"Error storing metrics: {e}")
@@ -233,23 +511,36 @@ async def get_cpu_history(
     agent_id: int,
     start: Optional[str] = Query("-1h", description="Start time (e.g., -1h, -24h, -7d)"),
     stop: Optional[str] = Query("now()", description="Stop time"),
-    interval: Optional[str] = Query("1m", description="Aggregation interval"),
+    interval: Optional[str] = Query(None, description="Aggregation interval (auto-selected if not provided)"),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get CPU usage history for an agent (authenticated, ownership enforced)"""
+    """Get CPU usage history for an agent (authenticated, ownership enforced).
+    
+    Automatically selects the appropriate bucket based on time range:
+    - <= 24h: Raw data (5-second resolution)
+    - <= 7d: 1-minute aggregated data
+    - > 7d: 1-hour aggregated data
+    """
     if not query_api:
         raise HTTPException(status_code=503, detail="InfluxDB not available")
     
     user_id = current_user["id"]
     
+    # Select appropriate bucket based on time range
+    bucket, field_suffix, default_interval = get_bucket_for_time_range(start)
+    use_interval = interval or default_interval
+    
+    # For hourly bucket, use the pre-aggregated avg field
+    field_name = f"usage_percent{field_suffix}" if field_suffix else "usage_percent"
+    
     query = f'''
-    from(bucket: "{INFLUXDB_BUCKET}")
+    from(bucket: "{bucket}")
         |> range(start: {start}, stop: {stop})
         |> filter(fn: (r) => r["_measurement"] == "cpu")
         |> filter(fn: (r) => r["agent_id"] == "{agent_id}")
         |> filter(fn: (r) => r["user_id"] == "{user_id}")
-        |> filter(fn: (r) => r["_field"] == "usage_percent")
-        |> aggregateWindow(every: {interval}, fn: mean, createEmpty: false)
+        |> filter(fn: (r) => r["_field"] == "{field_name}")
+        |> aggregateWindow(every: {use_interval}, fn: mean, createEmpty: false)
         |> yield(name: "mean")
     '''
     
@@ -262,7 +553,13 @@ async def get_cpu_history(
                     "time": record.get_time().isoformat(),
                     "value": record.get_value()
                 })
-        return {"metric": "cpu", "agent_id": agent_id, "data": data}
+        return {
+            "metric": "cpu",
+            "agent_id": agent_id,
+            "data": data,
+            "bucket": bucket,
+            "interval": use_interval
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -271,23 +568,31 @@ async def get_memory_history(
     agent_id: int,
     start: Optional[str] = Query("-1h", description="Start time"),
     stop: Optional[str] = Query("now()", description="Stop time"),
-    interval: Optional[str] = Query("1m", description="Aggregation interval"),
+    interval: Optional[str] = Query(None, description="Aggregation interval (auto-selected if not provided)"),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get memory usage history for an agent (authenticated, ownership enforced)"""
+    """Get memory usage history for an agent (authenticated, ownership enforced).
+    
+    Automatically selects the appropriate bucket based on time range.
+    """
     if not query_api:
         raise HTTPException(status_code=503, detail="InfluxDB not available")
     
     user_id = current_user["id"]
     
+    # Select appropriate bucket based on time range
+    bucket, field_suffix, default_interval = get_bucket_for_time_range(start)
+    use_interval = interval or default_interval
+    field_name = f"used_percent{field_suffix}" if field_suffix else "used_percent"
+    
     query = f'''
-    from(bucket: "{INFLUXDB_BUCKET}")
+    from(bucket: "{bucket}")
         |> range(start: {start}, stop: {stop})
         |> filter(fn: (r) => r["_measurement"] == "memory")
         |> filter(fn: (r) => r["agent_id"] == "{agent_id}")
         |> filter(fn: (r) => r["user_id"] == "{user_id}")
-        |> filter(fn: (r) => r["_field"] == "used_percent")
-        |> aggregateWindow(every: {interval}, fn: mean, createEmpty: false)
+        |> filter(fn: (r) => r["_field"] == "{field_name}")
+        |> aggregateWindow(every: {use_interval}, fn: mean, createEmpty: false)
         |> yield(name: "mean")
     '''
     
@@ -300,7 +605,13 @@ async def get_memory_history(
                     "time": record.get_time().isoformat(),
                     "value": record.get_value()
                 })
-        return {"metric": "memory", "agent_id": agent_id, "data": data}
+        return {
+            "metric": "memory",
+            "agent_id": agent_id,
+            "data": data,
+            "bucket": bucket,
+            "interval": use_interval
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -310,25 +621,33 @@ async def get_disk_history(
     mountpoint: Optional[str] = Query(None, description="Filter by mountpoint"),
     start: Optional[str] = Query("-1h", description="Start time"),
     stop: Optional[str] = Query("now()", description="Stop time"),
-    interval: Optional[str] = Query("5m", description="Aggregation interval"),
+    interval: Optional[str] = Query(None, description="Aggregation interval (auto-selected if not provided)"),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get disk usage history for an agent (authenticated, ownership enforced)"""
+    """Get disk usage history for an agent (authenticated, ownership enforced).
+    
+    Automatically selects the appropriate bucket based on time range.
+    """
     if not query_api:
         raise HTTPException(status_code=503, detail="InfluxDB not available")
     
     user_id = current_user["id"]
+    
+    # Select appropriate bucket based on time range
+    bucket, field_suffix, default_interval = get_bucket_for_time_range(start)
+    use_interval = interval or default_interval
+    field_name = f"percent{field_suffix}" if field_suffix else "percent"
     mountpoint_filter = f'|> filter(fn: (r) => r["mountpoint"] == "{mountpoint}")' if mountpoint else ""
     
     query = f'''
-    from(bucket: "{INFLUXDB_BUCKET}")
+    from(bucket: "{bucket}")
         |> range(start: {start}, stop: {stop})
         |> filter(fn: (r) => r["_measurement"] == "disk")
         |> filter(fn: (r) => r["agent_id"] == "{agent_id}")
         |> filter(fn: (r) => r["user_id"] == "{user_id}")
-        |> filter(fn: (r) => r["_field"] == "percent")
+        |> filter(fn: (r) => r["_field"] == "{field_name}")
         {mountpoint_filter}
-        |> aggregateWindow(every: {interval}, fn: mean, createEmpty: false)
+        |> aggregateWindow(every: {use_interval}, fn: mean, createEmpty: false)
         |> yield(name: "mean")
     '''
     
@@ -342,7 +661,13 @@ async def get_disk_history(
                     "value": record.get_value(),
                     "mountpoint": record.values.get("mountpoint", "unknown")
                 })
-        return {"metric": "disk", "agent_id": agent_id, "data": data}
+        return {
+            "metric": "disk",
+            "agent_id": agent_id,
+            "data": data,
+            "bucket": bucket,
+            "interval": use_interval
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -360,14 +685,18 @@ async def get_network_history(
     
     user_id = current_user["id"]
     
+    # Select appropriate bucket based on time range
+    bucket, _, default_interval = get_bucket_for_time_range(start)
+    use_interval = interval or default_interval
+    
     query = f'''
-    from(bucket: "{INFLUXDB_BUCKET}")
+    from(bucket: "{bucket}")
         |> range(start: {start}, stop: {stop})
         |> filter(fn: (r) => r["_measurement"] == "network")
         |> filter(fn: (r) => r["agent_id"] == "{agent_id}")
         |> filter(fn: (r) => r["user_id"] == "{user_id}")
         |> filter(fn: (r) => r["_field"] == "bytes_sent" or r["_field"] == "bytes_recv")
-        |> aggregateWindow(every: {interval}, fn: last, createEmpty: false)
+        |> aggregateWindow(every: {use_interval}, fn: last, createEmpty: false)
         |> yield(name: "last")
     '''
     
@@ -389,7 +718,9 @@ async def get_network_history(
             "metric": "network",
             "agent_id": agent_id,
             "bytes_sent": sent_data,
-            "bytes_recv": recv_data
+            "bytes_recv": recv_data,
+            "bucket": bucket,
+            "interval": use_interval
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -407,10 +738,13 @@ async def get_summary(
     
     user_id = current_user["id"]
     
+    # Select appropriate bucket based on time range
+    bucket, field_suffix, _ = get_bucket_for_time_range(start)
+    
     try:
         # CPU stats
         cpu_query = f'''
-        from(bucket: "{INFLUXDB_BUCKET}")
+        from(bucket: "{bucket}")
             |> range(start: {start}, stop: {stop})
             |> filter(fn: (r) => r["_measurement"] == "cpu")
             |> filter(fn: (r) => r["agent_id"] == "{agent_id}")
@@ -423,7 +757,7 @@ async def get_summary(
         
         # Memory stats
         mem_query = f'''
-        from(bucket: "{INFLUXDB_BUCKET}")
+        from(bucket: "{bucket}")
             |> range(start: {start}, stop: {stop})
             |> filter(fn: (r) => r["_measurement"] == "memory")
             |> filter(fn: (r) => r["agent_id"] == "{agent_id}")
@@ -437,6 +771,7 @@ async def get_summary(
         return {
             "agent_id": agent_id,
             "period": {"start": start, "stop": stop},
+            "bucket": bucket,
             "cpu": {
                 "avg": sum(cpu_values) / len(cpu_values) if cpu_values else 0,
                 "max": max(cpu_values) if cpu_values else 0,
