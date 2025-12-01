@@ -65,22 +65,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    container_name: statusmonitor-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - statusmonitor-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
   auth-service:
     build:
       context: ./auth_service
@@ -96,6 +80,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-statusmonitor}:${POSTGRES_PASSWORD:-statusmonitor}@postgres:5432/${POSTGRES_DB:-statusmonitor}
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -113,17 +98,14 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      redis:
-        condition: service_healthy
       auth-service:
         condition: service_healthy
     networks:
       - statusmonitor-network
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
       - AUTH_SERVICE_URL=http://auth-service:8000
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 10s
@@ -146,6 +128,7 @@ services:
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - AUTH_SERVICE_URL=http://auth-service:8000
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
       interval: 10s
@@ -176,6 +159,7 @@ services:
       - INFLUXDB_ORG=${INFLUXDB_ORG:-statusmonitor}
       - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-metrics}
       - AUTH_SERVICE_URL=http://auth-service:8000
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
       interval: 10s
@@ -204,6 +188,7 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-statusmonitor}:${POSTGRES_PASSWORD:-statusmonitor}@postgres:5432/${POSTGRES_DB:-statusmonitor}
       - AUTH_SERVICE_URL=http://auth-service:8000
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
       interval: 10s
@@ -252,7 +237,6 @@ services:
 
 volumes:
   postgres-data:
-  redis-data:
   kafka-data:
   zookeeper-data:
   influxdb-data:

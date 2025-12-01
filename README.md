@@ -125,7 +125,7 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 - **Telegram Notifications**: Instant alerts via Telegram bot
 - **Threshold Rules**: Configure CPU, memory, and disk thresholds per agent
 - **Per-Metric Cooldown**: Separate 5-minute cooldown timers for each metric type
-- **Immediate Triggering**: Alerts fire instantly if threshold already exceeded when rule is created
+- **Near-Instant Triggering**: Alerts fire within 1 second (agent interval) when threshold is exceeded
 - **Alert History**: Full log of all fired alerts with filtering and sorting
 
 ---
@@ -180,7 +180,7 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 │  │                         │    │                         │                  │
 │  │  • Kafka Consumer       │    │  • Kafka Consumer       │                  │
 │  │  • Time-series Storage  │    │  • Threshold Checks     │                  │
-│  │  • Auto Downsampling    │    │  • Redis Cache          │                  │
+│  │  • Auto Downsampling    │    │  • In-Memory Cache      │                  │
 │  │  • Smart Query Routing  │    │  • Alert History        │                  │
 │  └───────────┬─────────────┘    └────────────┬────────────┘                  │
 │              │                               │                                │
@@ -190,33 +190,32 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                            DATA STORES                                        │
 │                                                                               │
-│  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐         │
-│  │    PostgreSQL     │  │     InfluxDB      │  │      Redis        │         │
-│  │      :5432        │  │      :8086        │  │      :6379        │         │
-│  │                   │  │                   │  │                   │         │
-│  │  • Users          │  │  • metrics_raw    │  │  • Latest metrics │         │
-│  │  • Agents         │  │    (24h, raw)     │  │    cache for      │         │
-│  │  • Alert Rules    │  │  • metrics_1m     │  │    immediate rule │         │
-│  │  • Alert History  │  │    (7d, 1min res) │  │    evaluation     │         │
-│  │                   │  │  • metrics_1h     │  │                   │         │
-│  │                   │  │    (1yr, 1hr res) │  │                   │         │
-│  └───────────────────┘  └───────────────────┘  └───────────────────┘         │
-│         ▲                        ▲                       ▲                    │
-│         │                        │                       │                    │
-│    Auth Service            History Service          Alert Service             │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────┐            │
+│  │        PostgreSQL           │  │         InfluxDB            │            │
+│  │          :5432              │  │          :8086              │            │
+│  │                             │  │                             │            │
+│  │  • Users                    │  │  • metrics_raw (24h, raw)   │            │
+│  │  • Agents                   │  │  • metrics_1m (7d, 1min)    │            │
+│  │  • Alert Rules              │  │  • metrics_1h (1yr, 1hr)    │            │
+│  │  • Alert History            │  │                             │            │
+│  │  • Refresh Tokens           │  │                             │            │
+│  └─────────────────────────────┘  └─────────────────────────────┘            │
+│              ▲                               ▲                                │
+│              │                               │                                │
+│      Auth & Alert Services            History Service                         │
 │                                                                               │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Data Flow
 
-1. **Agents** collect metrics at configurable intervals (default 5s) and POST to Ingestion Service
+1. **Agents** collect metrics at configurable intervals (default 1s) and POST to Ingestion Service
 2. **Ingestion Service** validates token and publishes to Kafka topic `metrics`
 3. **Kafka** provides durable message streaming with 24-hour retention
 4. **Consumers** process messages independently:
    - **Distribution Service**: Broadcasts to WebSocket clients in real-time
    - **History Service**: Stores in InfluxDB tiered buckets with automatic downsampling
-   - **Alert Service**: Checks threshold rules, caches in Redis, sends Telegram notifications
+   - **Alert Service**: Checks threshold rules using in-memory cache, sends Telegram notifications
 
 ---
 
@@ -298,7 +297,6 @@ docker-compose up -d
 | History Service | 8003 |
 | Alert Service | 8004 |
 | PostgreSQL | 5432 |
-| Redis | 6379 |
 | Kafka | 9092 |
 | InfluxDB | 8086 |
 
@@ -431,6 +429,7 @@ python agent_service/main.py
 | `KAFKA_BOOTSTRAP_SERVERS` | kafka:29092 | Kafka broker address |
 | `INFLUXDB_TOKEN` | (required) | InfluxDB admin token |
 | `TELEGRAM_BOT_TOKEN` | (optional) | Telegram bot for alerts |
+| `CORS_ORIGINS` | localhost:5173 | Comma-separated allowed CORS origins |
 
 ### InfluxDB Buckets
 
@@ -704,7 +703,7 @@ ws://localhost:8002/ws/{agent_id}?token=<jwt>
 The ingestion endpoint currently lacks rate limiting. Considering implementing:
 - Per-agent request rate limits
 - Token bucket or sliding window algorithms
-- Redis-based distributed rate limiting
+- Distributed rate limiting with shared state
 
 ### Security Checklist
 
