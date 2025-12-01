@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Query, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
-import redis.asyncio as redis
+from aiokafka import AIOKafkaConsumer
 import asyncio
 import os
 import json
@@ -23,11 +23,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_CHANNEL_PREFIX = "metrics:"
+# Kafka configuration
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC = "metrics"
+KAFKA_GROUP_ID = "history-service"
 
+# InfluxDB configuration
 INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
 INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "statusmonitor-token")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "statusmonitor")
@@ -138,33 +139,43 @@ def store_metrics(data: dict):
     except Exception as e:
         print(f"Error storing metrics: {e}")
 
-async def redis_subscriber():
-    """Subscribe to all user metric channels and store in InfluxDB"""
+async def kafka_consumer():
+    """Consume metrics from Kafka and store in InfluxDB with auto-reconnect"""
     while True:
+        consumer = None
         try:
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
-            pubsub = r.pubsub()
-            
-            await pubsub.psubscribe(f"{REDIS_CHANNEL_PREFIX}*")
-            print(f"History service subscribed to Redis pattern: {REDIS_CHANNEL_PREFIX}*")
+            print(f"Connecting to Kafka at {KAFKA_BOOTSTRAP_SERVERS}...")
+            consumer = AIOKafkaConsumer(
+                KAFKA_TOPIC,
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                group_id=KAFKA_GROUP_ID,
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                auto_offset_reset="earliest",  # Process all messages (for history)
+                enable_auto_commit=True,
+            )
+            await consumer.start()
+            print(f"History service consuming from Kafka topic: {KAFKA_TOPIC}")
 
-            while True:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if message is not None and message["type"] == "pmessage":
-                    try:
-                        data = json.loads(message["data"])
-                        store_metrics(data)
-                    except json.JSONDecodeError as e:
-                        print(f"Error parsing message: {e}")
-                await asyncio.sleep(0.1)
+            async for msg in consumer:
+                try:
+                    data = msg.value
+                    store_metrics(data)
+                except Exception as e:
+                    print(f"Error processing message: {e}")
         except Exception as e:
-            print(f"Redis subscriber error: {e}. Reconnecting in 5 seconds...")
+            print(f"Kafka consumer error: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
+        finally:
+            if consumer:
+                try:
+                    await consumer.stop()
+                except:
+                    pass
 
 @app.on_event("startup")
 async def startup_event():
     init_influxdb()
-    asyncio.create_task(redis_subscriber())
+    asyncio.create_task(kafka_consumer())
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request, Header
 from typing import Optional
+from aiokafka import AIOKafkaProducer
 import redis
 import json
 import os
@@ -17,15 +18,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Kafka configuration
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC = "metrics"
+
+# Redis for caching (optional)
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://localhost:8000")
-REDIS_CHANNEL_PREFIX = "metrics:"  # metrics:{user_id}
 
+# Kafka producer (initialized at startup)
+kafka_producer: Optional[AIOKafkaProducer] = None
+
+# Redis client for caching
 try:
     redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
     redis_client.ping()
-    print(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
+    print(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT} for caching")
 except redis.ConnectionError:
     print(f"Could not connect to Redis at {REDIS_HOST}:{REDIS_PORT}")
     redis_client = None
@@ -43,6 +52,46 @@ async def validate_agent_token(token: str) -> dict:
         except Exception as e:
             print(f"Error validating token: {e}")
     return {"valid": False}
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize Kafka producer on startup"""
+    global kafka_producer
+    
+    print(f"Connecting to Kafka at {KAFKA_BOOTSTRAP_SERVERS}...")
+    kafka_producer = AIOKafkaProducer(
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+        key_serializer=lambda k: k.encode('utf-8') if k else None,
+        acks='all'  # Wait for all replicas to acknowledge
+    )
+    
+    # Retry connection with backoff
+    max_retries = 10
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            await kafka_producer.start()
+            print(f"Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"Kafka connection attempt {attempt + 1} failed: {e}. Retrying in {retry_delay}s...")
+                import asyncio
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 30)
+            else:
+                print(f"Failed to connect to Kafka after {max_retries} attempts")
+                kafka_producer = None
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup Kafka producer on shutdown"""
+    global kafka_producer
+    if kafka_producer:
+        await kafka_producer.stop()
+        print("Kafka producer stopped")
 
 @app.post("/ingest")
 async def ingest_metrics(
@@ -71,19 +120,37 @@ async def ingest_metrics(
     data["agent_name"] = token_info["agent_name"]
     data["user_id"] = token_info["user_id"]
     
-    # Publish to user-specific Redis channel
-    if not redis_client:
-        raise HTTPException(status_code=503, detail="Metrics storage unavailable")
+    # Publish to Kafka
+    if not kafka_producer:
+        raise HTTPException(status_code=503, detail="Metrics broker unavailable")
     
     try:
-        user_channel = f"{REDIS_CHANNEL_PREFIX}{token_info['user_id']}"
-        redis_client.publish(user_channel, json.dumps(data))
-    except redis.ConnectionError as e:
-        print(f"Error publishing to Redis: {e}")
-        raise HTTPException(status_code=503, detail="Failed to store metrics")
+        # Use agent_id as partition key to ensure ordering per agent
+        await kafka_producer.send_and_wait(
+            topic=KAFKA_TOPIC,
+            key=str(token_info["agent_id"]),
+            value=data
+        )
+    except Exception as e:
+        print(f"Error publishing to Kafka: {e}")
+        raise HTTPException(status_code=503, detail="Failed to publish metrics")
+    
+    # Cache latest metrics in Redis (optional, for quick lookups)
+    if redis_client:
+        try:
+            cache_key = f"latest_metrics:{token_info['agent_id']}"
+            redis_client.setex(cache_key, 60, json.dumps(data))  # 60 second TTL
+        except redis.ConnectionError:
+            pass  # Caching is optional, don't fail if Redis is down
             
     return {"status": "received"}
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "redis": "connected" if redis_client and redis_client.ping() else "disconnected"}
+    kafka_status = "connected" if kafka_producer else "disconnected"
+    redis_status = "connected" if redis_client and redis_client.ping() else "disconnected"
+    return {
+        "status": "ok",
+        "kafka": kafka_status,
+        "redis_cache": redis_status
+    }

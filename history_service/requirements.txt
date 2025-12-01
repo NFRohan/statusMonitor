@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-redis
+aiokafka
 influxdb-client
 python-dotenv
 httpx

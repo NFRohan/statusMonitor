@@ -4,22 +4,24 @@ from typing import List, Optional
 import models
 import schemas
 import database
-import redis
+from kafka import KafkaConsumer
 import json
 import threading
 import os
 import time
 from telegram_bot import send_telegram_message
 import requests
+import redis
 
 app = FastAPI()
 
 # Create tables
 models.Base.metadata.create_all(bind=database.engine)
 
-# Redis connection
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+# Kafka configuration
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC = "metrics"
+KAFKA_GROUP_ID = "alert-service"
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth-service:8000")
 
 # Cache for rules to avoid DB hits on every metric
@@ -28,7 +30,13 @@ RULES_CACHE = {}
 # Cache for recipients
 # Structure: {user_id: chat_id}
 RECIPIENTS_CACHE = {}
-# Cooldown tracker: {rule_id: last_triggered_timestamp}
+
+# Redis for caching latest metrics per agent
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+redis_client = None
+# Cooldown tracker: {"rule_id:metric_type": last_triggered_timestamp}
+# Each metric type (cpu, memory, disk) has its own cooldown timer per rule
 COOLDOWN_TRACKER = {}
 COOLDOWN_SECONDS = 300  # 5 minutes cooldown
 
@@ -94,8 +102,9 @@ def check_metrics(data):
         if rule["user_id"] != data_user_id:
             continue
         
-        # Check cooldown
-        last_triggered = COOLDOWN_TRACKER.get(rule["id"], 0)
+        # Check cooldown - each metric type has its own timer
+        cooldown_key = f"{rule['id']}:{rule['metric_type']}"
+        last_triggered = COOLDOWN_TRACKER.get(cooldown_key, 0)
         if time.time() - last_triggered < COOLDOWN_SECONDS:
             continue
 
@@ -106,9 +115,17 @@ def check_metrics(data):
         if rule["metric_type"] == "cpu":
             current_value = data.get("cpu", {}).get("usage_percent", 0)
         elif rule["metric_type"] == "memory":
-            current_value = data.get("memory", {}).get("usage_percent", data.get("memory", {}).get("percent", 0))
+            mem = data.get("memory", {})
+            current_value = mem.get("used_percent", mem.get("usage_percent", mem.get("percent", 0)))
         elif rule["metric_type"] == "disk":
-            current_value = data.get("disk", {}).get("usage_percent", data.get("disk", {}).get("percent", 0))
+            # Disk metrics are in partitions array - use max across all partitions
+            disk = data.get("disk", {})
+            partitions = disk.get("partitions", [])
+            if partitions:
+                current_value = max(p.get("percent", 0) for p in partitions)
+            else:
+                # Fallback for flat structure
+                current_value = disk.get("usage_percent", disk.get("percent", 0))
             
         # Evaluate condition
         if rule["condition"] == "gt" and current_value > rule["threshold"]:
@@ -127,7 +144,7 @@ def check_metrics(data):
                 msg += f"Threshold: {'>' if rule['condition'] == 'gt' else '<'} {rule['threshold']}%\n"
                 
                 if send_telegram_message(chat_id, msg):
-                    COOLDOWN_TRACKER[rule["id"]] = time.time()
+                    COOLDOWN_TRACKER[cooldown_key] = time.time()
                     
                     # Log to history (optional, async to not block)
                     # db = database.SessionLocal()
@@ -136,37 +153,120 @@ def check_metrics(data):
                     # db.commit()
                     # db.close()
 
-def redis_listener():
-    """Background task to listen for metrics with auto-reconnect"""
+def kafka_listener():
+    """Background task to consume metrics from Kafka with auto-reconnect"""
     backoff = 1
     max_backoff = 60
     
     while True:
+        consumer = None
         try:
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-            pubsub = r.pubsub()
-            pubsub.psubscribe("metrics:*")
+            print(f"Connecting to Kafka at {KAFKA_BOOTSTRAP_SERVERS}...")
+            consumer = KafkaConsumer(
+                KAFKA_TOPIC,
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS.split(','),
+                group_id=KAFKA_GROUP_ID,
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                auto_offset_reset='latest',
+                enable_auto_commit=True,
+            )
             
-            print("Started Redis listener for alerts")
+            print(f"Started Kafka consumer for alerts (topic: {KAFKA_TOPIC})")
             backoff = 1  # Reset backoff on successful connection
             
-            for message in pubsub.listen():
-                if message["type"] == "pmessage":
-                    try:
-                        data = json.loads(message["data"])
-                        check_metrics(data)
-                    except Exception as e:
-                        pass  # Silently ignore malformed messages
+            for message in consumer:
+                try:
+                    data = message.value
+                    check_metrics(data)
+                except Exception as e:
+                    pass  # Silently ignore malformed messages
         except Exception as e:
-            print(f"Redis listener error: {e}. Reconnecting in {backoff} seconds...")
+            print(f"Kafka consumer error: {e}. Reconnecting in {backoff} seconds...")
             time.sleep(backoff)
             backoff = min(backoff * 2, max_backoff)  # Exponential backoff
+        finally:
+            if consumer:
+                try:
+                    consumer.close()
+                except:
+                    pass
+
+def check_rule_immediately(rule_dict: dict, user_id: int):
+    """
+    Check a newly created rule against the cached latest metrics.
+    This ensures alerts fire immediately if the condition is already met.
+    """
+    if not redis_client:
+        return
+    
+    agent_id = str(rule_dict["agent_id"])
+    cache_key = f"metrics:{agent_id}"
+    
+    try:
+        cached_data = redis_client.get(cache_key)
+        if not cached_data:
+            return
+        
+        data = json.loads(cached_data)
+        
+        # Verify this data belongs to the same user
+        if data.get("user_id") != user_id:
+            return
+        
+        # Extract current value based on metric type
+        current_value = 0
+        if rule_dict["metric_type"] == "cpu":
+            current_value = data.get("cpu", {}).get("usage_percent", 0)
+        elif rule_dict["metric_type"] == "memory":
+            mem = data.get("memory", {})
+            current_value = mem.get("used_percent", mem.get("usage_percent", mem.get("percent", 0)))
+        elif rule_dict["metric_type"] == "disk":
+            # Disk metrics are in partitions array - use max across all partitions
+            disk = data.get("disk", {})
+            partitions = disk.get("partitions", [])
+            if partitions:
+                current_value = max(p.get("percent", 0) for p in partitions)
+            else:
+                # Fallback for flat structure
+                current_value = disk.get("usage_percent", disk.get("percent", 0))
+        
+        # Evaluate condition
+        triggered = False
+        if rule_dict["condition"] == "gt" and current_value > rule_dict["threshold"]:
+            triggered = True
+        elif rule_dict["condition"] == "lt" and current_value < rule_dict["threshold"]:
+            triggered = True
+        
+        if triggered:
+            chat_id = RECIPIENTS_CACHE.get(user_id)
+            if chat_id:
+                agent_name = data.get("agent_name", "Unknown Agent")
+                msg = f"🚨 *Alert for {agent_name}*\n\n"
+                msg += f"Metric: {rule_dict['metric_type'].upper()}\n"
+                msg += f"Current Value: {current_value:.1f}%\n"
+                msg += f"Threshold: {'>' if rule_dict['condition'] == 'gt' else '<'} {rule_dict['threshold']}%\n"
+                msg += f"\n_Alert triggered immediately on rule creation_"
+                
+                if send_telegram_message(chat_id, msg):
+                    cooldown_key = f"{rule_dict['id']}:{rule_dict['metric_type']}"
+                    COOLDOWN_TRACKER[cooldown_key] = time.time()
+    except Exception as e:
+        print(f"Error checking rule immediately: {e}")
 
 @app.on_event("startup")
 async def startup_event():
+    global redis_client
+    try:
+        redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        redis_client.ping()
+        print(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
+    except Exception as e:
+        print(f"Warning: Could not connect to Redis: {e}")
+        redis_client = None
+    
     refresh_caches()
-    # Start Redis listener in background thread
-    thread = threading.Thread(target=redis_listener, daemon=True)
+    # Start Kafka consumer in background thread
+    thread = threading.Thread(target=kafka_listener, daemon=True)
     thread.start()
 
 @app.get("/health")
@@ -207,6 +307,16 @@ def create_rule(
     db.commit()
     db.refresh(db_rule)
     refresh_caches()
+    
+    # Immediately check if alert should fire based on cached metrics
+    check_rule_immediately({
+        "id": db_rule.id,
+        "agent_id": db_rule.agent_id,
+        "metric_type": db_rule.metric_type,
+        "condition": db_rule.condition,
+        "threshold": db_rule.threshold
+    }, current_user["id"])
+    
     return db_rule
 
 @app.delete("/rules/{rule_id}")

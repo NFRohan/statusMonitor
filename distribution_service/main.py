@@ -1,5 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, status
-import redis.asyncio as redis
+from aiokafka import AIOKafkaConsumer
 import asyncio
 import os
 import json
@@ -20,9 +20,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_CHANNEL_PREFIX = "metrics:"
+# Kafka configuration
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC = "metrics"
+KAFKA_GROUP_ID = "distribution-service"
 
 async def validate_token(token: str) -> Optional[dict]:
     """Validate JWT token with auth service and return user info"""
@@ -85,37 +86,48 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-async def redis_subscriber():
-    """Subscribe to all user channels and distribute messages with auto-reconnect"""
+async def kafka_consumer():
+    """Consume metrics from Kafka and distribute to WebSocket clients with auto-reconnect"""
     while True:
+        consumer = None
         try:
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
-            pubsub = r.pubsub()
-            
-            # Use pattern subscription to listen to all metrics:* channels
-            await pubsub.psubscribe(f"{REDIS_CHANNEL_PREFIX}*")
-            print(f"Subscribed to Redis pattern: {REDIS_CHANNEL_PREFIX}*")
+            print(f"Connecting to Kafka at {KAFKA_BOOTSTRAP_SERVERS}...")
+            consumer = AIOKafkaConsumer(
+                KAFKA_TOPIC,
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                group_id=KAFKA_GROUP_ID,
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                auto_offset_reset="latest",  # Only new messages for realtime
+                enable_auto_commit=True,
+            )
+            await consumer.start()
+            print(f"Connected to Kafka, consuming from topic: {KAFKA_TOPIC}")
 
-            while True:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if message is not None and message["type"] == "pmessage":
-                    # Extract user_id from channel name (metrics:{user_id})
-                    channel = message["channel"]
-                    try:
-                        user_id = int(channel.split(":")[-1])
-                        data = json.loads(message["data"])
-                        agent_id = data.get("agent_id")
-                        await manager.send_to_user(user_id, message["data"], agent_id)
-                    except (ValueError, json.JSONDecodeError) as e:
-                        print(f"Error processing message: {e}")
-                await asyncio.sleep(0.01)  # Small delay to prevent busy loop
+            async for msg in consumer:
+                try:
+                    data = msg.value
+                    user_id = data.get("user_id")
+                    agent_id = data.get("agent_id")
+                    
+                    if user_id:
+                        # Serialize back to JSON string for WebSocket
+                        await manager.send_to_user(user_id, json.dumps(data), agent_id)
+                except Exception as e:
+                    print(f"Error processing Kafka message: {e}")
+                    
         except Exception as e:
-            print(f"Redis subscriber error: {e}. Reconnecting in 5 seconds...")
+            print(f"Kafka consumer error: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
+        finally:
+            if consumer:
+                try:
+                    await consumer.stop()
+                except:
+                    pass
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(redis_subscriber())
+    asyncio.create_task(kafka_consumer())
 
 @app.websocket("/ws")
 async def websocket_endpoint(
@@ -150,6 +162,7 @@ def health():
     total_connections = sum(len(conns) for conns in manager.user_connections.values())
     return {
         "status": "ok",
+        "broker": "kafka",
         "total_connections": total_connections,
         "users_connected": len(manager.user_connections)
     }
