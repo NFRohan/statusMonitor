@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Link } from 'react-router-dom';
-import { Activity, Bell, Trash2, Plus, Save, AlertTriangle } from 'lucide-react';
+import { Activity, Bell, Trash2, Plus, Save, AlertTriangle, History, Filter, RefreshCw } from 'lucide-react';
 import axios from 'axios';
 
 const Alerts = () => {
@@ -17,9 +17,19 @@ const Alerts = () => {
         threshold: 90
     });
     const [message, setMessage] = useState({ type: '', text: '' });
+    
+    // Alert history state
+    const [history, setHistory] = useState([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
+    const [historyFilter, setHistoryFilter] = useState({
+        agent_id: '',
+        metric_type: ''
+    });
+    const [sortOrder, setSortOrder] = useState('desc'); // desc = newest first
 
     useEffect(() => {
         fetchData();
+        fetchHistory();
     }, []);
 
     const fetchData = async () => {
@@ -52,6 +62,57 @@ const Alerts = () => {
         } finally {
             setLoading(false);
         }
+    };
+
+    const fetchHistory = async (filters = historyFilter) => {
+        setHistoryLoading(true);
+        try {
+            const headers = { Authorization: `Bearer ${tokens.access_token}` };
+            const params = new URLSearchParams();
+            if (filters.agent_id) params.append('agent_id', filters.agent_id);
+            if (filters.metric_type) params.append('metric_type', filters.metric_type);
+            params.append('limit', '100');
+            
+            const res = await axios.get(`/api/alerts/history?${params.toString()}`, { headers });
+            setHistory(res.data);
+        } catch (err) {
+            console.error('Error fetching history:', err);
+        } finally {
+            setHistoryLoading(false);
+        }
+    };
+
+    const handleClearHistory = async () => {
+        if (!window.confirm('Are you sure you want to clear all alert history?')) return;
+        try {
+            await axios.delete('/api/alerts/history', {
+                headers: { Authorization: `Bearer ${tokens.access_token}` }
+            });
+            setHistory([]);
+            setMessage({ type: 'success', text: 'Alert history cleared' });
+        } catch (err) {
+            setMessage({ type: 'error', text: 'Failed to clear history' });
+        }
+    };
+
+    const handleFilterChange = (key, value) => {
+        const newFilter = { ...historyFilter, [key]: value };
+        setHistoryFilter(newFilter);
+        fetchHistory(newFilter);
+    };
+
+    const getSortedHistory = () => {
+        const sorted = [...history].sort((a, b) => {
+            const dateA = new Date(a.triggered_at);
+            const dateB = new Date(b.triggered_at);
+            return sortOrder === 'desc' ? dateB - dateA : dateA - dateB;
+        });
+        return sorted;
+    };
+
+    const formatDate = (dateStr) => {
+        const date = new Date(dateStr);
+        return date.toLocaleString();
     };
 
     const handleSaveRecipient = async () => {
@@ -281,6 +342,131 @@ const Alerts = () => {
                                 </tbody>
                             </table>
                         </div>
+                    </div>
+
+                    {/* Alert History */}
+                    <div className="bg-white shadow rounded-lg p-6 lg:col-span-3">
+                        <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center">
+                                <History className="h-6 w-6 text-indigo-600 mr-2" />
+                                <h2 className="text-lg font-medium text-gray-900">Alert History</h2>
+                            </div>
+                            <div className="flex items-center space-x-2">
+                                <button
+                                    onClick={() => fetchHistory()}
+                                    className="p-2 text-gray-500 hover:text-gray-700"
+                                    title="Refresh"
+                                >
+                                    <RefreshCw className={`h-5 w-5 ${historyLoading ? 'animate-spin' : ''}`} />
+                                </button>
+                                <button
+                                    onClick={handleClearHistory}
+                                    className="px-3 py-1 text-sm text-red-600 hover:text-red-800 border border-red-300 rounded-md hover:bg-red-50"
+                                >
+                                    Clear All
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Filters */}
+                        <div className="flex flex-wrap gap-4 mb-4 p-4 bg-gray-50 rounded-lg">
+                            <div className="flex items-center space-x-2">
+                                <Filter className="h-4 w-4 text-gray-500" />
+                                <span className="text-sm font-medium text-gray-700">Filters:</span>
+                            </div>
+                            <div>
+                                <select
+                                    value={historyFilter.agent_id}
+                                    onChange={(e) => handleFilterChange('agent_id', e.target.value)}
+                                    className="text-sm border border-gray-300 rounded-md shadow-sm py-1 px-2 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                                >
+                                    <option value="">All Agents</option>
+                                    {agents.map(agent => (
+                                        <option key={agent.id} value={agent.id}>{agent.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <select
+                                    value={historyFilter.metric_type}
+                                    onChange={(e) => handleFilterChange('metric_type', e.target.value)}
+                                    className="text-sm border border-gray-300 rounded-md shadow-sm py-1 px-2 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                                >
+                                    <option value="">All Metrics</option>
+                                    <option value="cpu">CPU</option>
+                                    <option value="memory">Memory</option>
+                                    <option value="disk">Disk</option>
+                                </select>
+                            </div>
+                            <div>
+                                <select
+                                    value={sortOrder}
+                                    onChange={(e) => setSortOrder(e.target.value)}
+                                    className="text-sm border border-gray-300 rounded-md shadow-sm py-1 px-2 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                                >
+                                    <option value="desc">Newest First</option>
+                                    <option value="asc">Oldest First</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        {/* History Table */}
+                        <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                            <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-50 sticky top-0">
+                                    <tr>
+                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time</th>
+                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Agent</th>
+                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Metric</th>
+                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Condition</th>
+                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Threshold</th>
+                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                    {getSortedHistory().map((item) => (
+                                        <tr key={item.id} className="hover:bg-red-50">
+                                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                                                {formatDate(item.triggered_at)}
+                                            </td>
+                                            <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">
+                                                {item.agent_name || getAgentName(item.agent_id)}
+                                            </td>
+                                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                                                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                                    item.metric_type === 'cpu' ? 'bg-blue-100 text-blue-800' :
+                                                    item.metric_type === 'memory' ? 'bg-purple-100 text-purple-800' :
+                                                    'bg-orange-100 text-orange-800'
+                                                }`}>
+                                                    {item.metric_type.toUpperCase()}
+                                                </span>
+                                            </td>
+                                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                                                {item.condition === 'gt' ? '>' : '<'}
+                                            </td>
+                                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                                                {item.threshold}%
+                                            </td>
+                                            <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-red-600">
+                                                {item.value?.toFixed(1)}%
+                                            </td>
+                                        </tr>
+                                    ))}
+                                    {history.length === 0 && (
+                                        <tr>
+                                            <td colSpan="6" className="px-4 py-8 text-center text-sm text-gray-500">
+                                                {historyLoading ? 'Loading...' : 'No alerts have been triggered yet.'}
+                                            </td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                        {history.length > 0 && (
+                            <div className="mt-3 text-sm text-gray-500 text-right">
+                                Showing {history.length} alert{history.length !== 1 ? 's' : ''}
+                            </div>
+                        )}
                     </div>
                 </div>
             </main>

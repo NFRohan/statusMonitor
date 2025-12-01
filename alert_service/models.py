@@ -27,7 +27,13 @@ class AlertHistory(Base):
     __tablename__ = "alert_history"
 
     id = Column(Integer, primary_key=True, index=True)
-    rule_id = Column(Integer, ForeignKey("alert_rules.id"))
-    agent_id = Column(String)
+    user_id = Column(Integer, index=True)
+    rule_id = Column(Integer, ForeignKey("alert_rules.id", ondelete="SET NULL"), nullable=True)
+    agent_id = Column(String, index=True)
+    agent_name = Column(String, nullable=True)
+    metric_type = Column(String)
+    condition = Column(String)
+    threshold = Column(Float)
+    value = Column(Float)
     message = Column(String)
-    triggered_at = Column(DateTime(timezone=True), server_default=func.now())
+    triggered_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

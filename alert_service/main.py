@@ -136,22 +136,37 @@ def check_metrics(data):
         if triggered:
             # Send Alert
             chat_id = RECIPIENTS_CACHE.get(rule["user_id"])
-            if chat_id:
-                agent_name = data.get("agent_name", "Unknown Agent")
-                msg = f"🚨 *Alert for {agent_name}*\n\n"
-                msg += f"Metric: {rule['metric_type'].upper()}\n"
-                msg += f"Current Value: {current_value:.1f}%\n"
-                msg += f"Threshold: {'>' if rule['condition'] == 'gt' else '<'} {rule['threshold']}%\n"
-                
-                if send_telegram_message(chat_id, msg):
-                    COOLDOWN_TRACKER[cooldown_key] = time.time()
-                    
-                    # Log to history (optional, async to not block)
-                    # db = database.SessionLocal()
-                    # history = models.AlertHistory(rule_id=rule["id"], agent_id=agent_id, message=msg)
-                    # db.add(history)
-                    # db.commit()
-                    # db.close()
+            agent_name = data.get("agent_name", "Unknown Agent")
+            msg = f"🚨 *Alert for {agent_name}*\n\n"
+            msg += f"Metric: {rule['metric_type'].upper()}\n"
+            msg += f"Current Value: {current_value:.1f}%\n"
+            msg += f"Threshold: {'>' if rule['condition'] == 'gt' else '<'} {rule['threshold']}%\n"
+            
+            # Log to history regardless of telegram delivery
+            try:
+                db = database.SessionLocal()
+                history = models.AlertHistory(
+                    user_id=rule["user_id"],
+                    rule_id=rule["id"],
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                    metric_type=rule["metric_type"],
+                    condition=rule["condition"],
+                    threshold=rule["threshold"],
+                    value=current_value,
+                    message=msg
+                )
+                db.add(history)
+                db.commit()
+                db.close()
+            except Exception as e:
+                print(f"Error logging alert history: {e}")
+            
+            if chat_id and send_telegram_message(chat_id, msg):
+                COOLDOWN_TRACKER[cooldown_key] = time.time()
+            else:
+                # Still set cooldown even if telegram fails, to prevent spam
+                COOLDOWN_TRACKER[cooldown_key] = time.time()
 
 def kafka_listener():
     """Background task to consume metrics from Kafka with auto-reconnect"""
@@ -239,17 +254,38 @@ def check_rule_immediately(rule_dict: dict, user_id: int):
         
         if triggered:
             chat_id = RECIPIENTS_CACHE.get(user_id)
-            if chat_id:
-                agent_name = data.get("agent_name", "Unknown Agent")
-                msg = f"🚨 *Alert for {agent_name}*\n\n"
-                msg += f"Metric: {rule_dict['metric_type'].upper()}\n"
-                msg += f"Current Value: {current_value:.1f}%\n"
-                msg += f"Threshold: {'>' if rule_dict['condition'] == 'gt' else '<'} {rule_dict['threshold']}%\n"
-                msg += f"\n_Alert triggered immediately on rule creation_"
-                
-                if send_telegram_message(chat_id, msg):
-                    cooldown_key = f"{rule_dict['id']}:{rule_dict['metric_type']}"
-                    COOLDOWN_TRACKER[cooldown_key] = time.time()
+            agent_name = data.get("agent_name", "Unknown Agent")
+            msg = f"🚨 *Alert for {agent_name}*\n\n"
+            msg += f"Metric: {rule_dict['metric_type'].upper()}\n"
+            msg += f"Current Value: {current_value:.1f}%\n"
+            msg += f"Threshold: {'>' if rule_dict['condition'] == 'gt' else '<'} {rule_dict['threshold']}%\n"
+            msg += f"\n_Alert triggered immediately on rule creation_"
+            
+            # Log to history
+            try:
+                db = database.SessionLocal()
+                history = models.AlertHistory(
+                    user_id=user_id,
+                    rule_id=rule_dict["id"],
+                    agent_id=str(rule_dict["agent_id"]),
+                    agent_name=agent_name,
+                    metric_type=rule_dict["metric_type"],
+                    condition=rule_dict["condition"],
+                    threshold=rule_dict["threshold"],
+                    value=current_value,
+                    message=msg
+                )
+                db.add(history)
+                db.commit()
+                db.close()
+            except Exception as e:
+                print(f"Error logging alert history: {e}")
+            
+            cooldown_key = f"{rule_dict['id']}:{rule_dict['metric_type']}"
+            if chat_id and send_telegram_message(chat_id, msg):
+                COOLDOWN_TRACKER[cooldown_key] = time.time()
+            else:
+                COOLDOWN_TRACKER[cooldown_key] = time.time()
     except Exception as e:
         print(f"Error checking rule immediately: {e}")
 
@@ -362,3 +398,39 @@ def update_recipient(
     db.refresh(db_recipient)
     refresh_caches()
     return db_recipient
+
+@app.get("/history", response_model=List[schemas.AlertHistoryResponse])
+def get_alert_history(
+    agent_id: Optional[str] = None,
+    metric_type: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Get alert history with optional filtering"""
+    query = db.query(models.AlertHistory).filter(
+        models.AlertHistory.user_id == current_user["id"]
+    )
+    
+    if agent_id:
+        query = query.filter(models.AlertHistory.agent_id == agent_id)
+    if metric_type:
+        query = query.filter(models.AlertHistory.metric_type == metric_type)
+    
+    # Order by most recent first
+    query = query.order_by(models.AlertHistory.triggered_at.desc())
+    
+    return query.offset(offset).limit(limit).all()
+
+@app.delete("/history")
+def clear_alert_history(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Clear all alert history for the current user"""
+    db.query(models.AlertHistory).filter(
+        models.AlertHistory.user_id == current_user["id"]
+    ).delete()
+    db.commit()
+    return {"status": "cleared"}

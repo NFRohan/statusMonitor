@@ -34,3 +34,18 @@ class AlertRecipientResponse(AlertRecipientBase):
 
     class Config:
         from_attributes = True
+
+class AlertHistoryResponse(BaseModel):
+    id: int
+    rule_id: Optional[int]
+    agent_id: str
+    agent_name: Optional[str] = None
+    metric_type: str
+    condition: str
+    threshold: float
+    value: float
+    message: str
+    triggered_at: datetime
+
+    class Config:
+        from_attributes = True
