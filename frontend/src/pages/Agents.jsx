@@ -15,7 +15,7 @@ const Agents = () => {
     const [error, setError] = useState('');
     const [tokenTimeRemaining, setTokenTimeRemaining] = useState(null);
 
-    const fetchAgents = async () => {
+    const fetchAgents = useCallback(async () => {
         try {
             const response = await axios.get('http://localhost:8000/agents', {
                 headers: { Authorization: `Bearer ${tokens.access_token}` }
@@ -27,11 +27,19 @@ const Agents = () => {
         } finally {
             setLoading(false);
         }
-    };
+    }, [tokens]);
 
+    // Initial fetch and periodic polling for status updates
     useEffect(() => {
         fetchAgents();
-    }, [tokens]);
+        
+        // Poll every 5 seconds to catch status changes (pending -> active)
+        const pollInterval = setInterval(() => {
+            fetchAgents();
+        }, 5000);
+        
+        return () => clearInterval(pollInterval);
+    }, [fetchAgents]);
 
     // Countdown timer for token expiration
     useEffect(() => {

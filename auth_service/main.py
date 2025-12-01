@@ -9,13 +9,17 @@ import models, schemas, auth, database
 
 database.Base.metadata.create_all(bind=database.engine)
 
+import os
+
 app = FastAPI()
 
 from fastapi.middleware.cors import CORSMiddleware
 
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -222,13 +226,17 @@ async def list_agents(
     ).all()
     return agents
 
-@app.get("/agents/{agent_id}", response_model=schemas.AgentResponse)
+@app.get("/agents/{agent_id}", response_model=schemas.AgentDetailResponse)
 async def get_agent(
     agent_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get a specific agent by ID"""
+    """Get a specific agent by ID.
+    
+    Note: Token is not returned for security. Use create or regenerate-token
+    endpoints to obtain the token (shown only once).
+    """
     agent = db.query(models.Agent).filter(
         models.Agent.id == agent_id,
         models.Agent.user_id == current_user.id
@@ -316,6 +324,24 @@ async def validate_agent_token(token: str, db: Session = Depends(get_db)):
         user_id=agent.user_id,
         agent_name=agent.name
     )
+
+@app.delete("/admin/cleanup-tokens")
+async def cleanup_expired_tokens(db: Session = Depends(get_db)):
+    """Clean up expired and revoked refresh tokens.
+    
+    This endpoint should be called periodically (e.g., via cron job) to prevent
+    unbounded growth of the RefreshToken table.
+    """
+    now = datetime.now(timezone.utc)
+    
+    # Delete tokens that are either expired or revoked
+    deleted_count = db.query(models.RefreshToken).filter(
+        (models.RefreshToken.expires_at < now) | (models.RefreshToken.revoked == True)
+    ).delete(synchronize_session=False)
+    
+    db.commit()
+    
+    return {"message": f"Cleaned up {deleted_count} expired/revoked tokens"}
 
 @app.get("/health")
 def health():

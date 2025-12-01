@@ -14,11 +14,90 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
+# Validation patterns for Flux query parameters to prevent injection
+DURATION_PATTERN = re.compile(r'^-?(\d+)(s|m|h|d|w|mo|y)$')
+INTERVAL_PATTERN = re.compile(r'^\d+(s|m|h|d)$')
+STOP_PATTERN = re.compile(r'^(now\(\)|-?\d+(s|m|h|d|w|mo|y))$')
+
+# Maximum allowed duration in seconds (365 days) to prevent resource exhaustion
+MAX_DURATION_SECONDS = 365 * 24 * 60 * 60
+
+# Duration unit multipliers for validation
+DURATION_MULTIPLIERS = {
+    's': 1,
+    'm': 60,
+    'h': 3600,
+    'd': 86400,
+    'w': 604800,
+    'mo': 2592000,  # ~30 days
+    'y': 31536000   # ~365 days
+}
+
+def validate_duration(value: str, param_name: str) -> str:
+    """Validate and sanitize duration parameters to prevent Flux injection and resource exhaustion."""
+    if value == "now()":
+        return value
+    
+    match = DURATION_PATTERN.match(value)
+    if not match:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {param_name} format. Use patterns like -1h, -24h, -7d, -30d, -1y"
+        )
+    
+    # Extract numeric value and unit, clamp to max allowed duration
+    num_value = int(match.group(1))
+    unit = match.group(2)
+    duration_seconds = num_value * DURATION_MULTIPLIERS.get(unit, 1)
+    
+    if duration_seconds > MAX_DURATION_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Duration exceeds maximum allowed (365 days). Requested: {value}"
+        )
+    
+    return value
+
+def validate_interval(value: str) -> str:
+    """Validate and sanitize interval parameters to prevent Flux injection."""
+    if not INTERVAL_PATTERN.match(value):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid interval format. Use patterns like 1m, 5m, 1h, 1d"
+        )
+    return value
+
+def validate_stop(value: str) -> str:
+    """Validate stop parameter to prevent Flux injection and resource exhaustion."""
+    if value == "now()":
+        return value
+    
+    match = DURATION_PATTERN.match(value)
+    if not match:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid stop format. Use 'now()' or patterns like -1h, -24h"
+        )
+    
+    # Also clamp stop parameter to prevent huge ranges
+    num_value = int(match.group(1))
+    unit = match.group(2)
+    duration_seconds = num_value * DURATION_MULTIPLIERS.get(unit, 1)
+    
+    if duration_seconds > MAX_DURATION_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stop duration exceeds maximum allowed (365 days). Requested: {value}"
+        )
+    
+    return value
+
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth-service:8000")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,18 +127,22 @@ buckets_api = None
 tasks_api = None
 
 # Bucket configurations for downsampling
+# NOTE: The downsampling tasks assume a typical agent reporting interval.
+# If agents report less frequently (e.g., every 30s+), the 1-minute aggregation
+# will have fewer data points, and hourly min/max/avg values may be less accurate.
+# Consider this trade-off when configuring agent intervals.
 BUCKET_CONFIGS = {
     BUCKET_RAW: {
         "retention_seconds": 24 * 60 * 60,  # 24 hours
-        "description": "Raw metrics at 5-second resolution"
+        "description": "Raw metrics at agent-configured interval (default: few seconds)"
     },
     BUCKET_1M: {
         "retention_seconds": 7 * 24 * 60 * 60,  # 7 days
-        "description": "1-minute aggregated metrics"
+        "description": "1-minute aggregated metrics (accuracy depends on agent interval)"
     },
     BUCKET_1H: {
         "retention_seconds": 365 * 24 * 60 * 60,  # 1 year
-        "description": "1-hour aggregated metrics"
+        "description": "1-hour aggregated metrics with min/max/avg"
     }
 }
 
@@ -169,9 +252,18 @@ def setup_buckets_and_tasks():
 
 
 def create_downsampling_tasks(org_id: str):
-    """Create InfluxDB tasks for downsampling data"""
+    """Create InfluxDB tasks for downsampling data.
     
-    # Task: Raw (5s) -> 1 minute
+    IMPORTANT: These tasks assume agents report metrics at a configurable interval
+    (typically a few seconds). If agents report less frequently:
+    - Raw -> 1m aggregation: fewer points averaged, still accurate mean
+    - 1m -> 1h aggregation: min/max/avg computed from fewer 1m samples
+    
+    For agents with intervals >= 30s, the 1-minute bucket will essentially
+    mirror raw data, and hourly stats will have reduced granularity.
+    """
+    
+    # Task: Raw -> 1 minute
     task_raw_to_1m = f'''
 option task = {{name: "downsample_raw_to_1m", every: 1m}}
 
@@ -479,23 +571,6 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     except httpx.RequestError:
         raise HTTPException(status_code=503, detail="Auth service unavailable")
 
-async def verify_agent_ownership(user_id: int, agent_id: int) -> bool:
-    """Check if agent belongs to user via auth service"""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{AUTH_SERVICE_URL}/agents/{agent_id}",
-                headers={"Authorization": f"internal-check"},  # Internal call
-                timeout=5.0
-            )
-            if response.status_code == 200:
-                agent = response.json()
-                # Check user_id in InfluxDB tags instead (agent stored with user_id)
-                return True  # For now, verify via query filter
-    except Exception:
-        pass
-    return True  # Fallback: will be filtered by user_id in query
-
 # Response models
 class MetricPoint(BaseModel):
     time: str
@@ -517,18 +592,22 @@ async def get_cpu_history(
     """Get CPU usage history for an agent (authenticated, ownership enforced).
     
     Automatically selects the appropriate bucket based on time range:
-    - <= 24h: Raw data (5-second resolution)
+    - <= 24h: Raw data (agent-configured resolution)
     - <= 7d: 1-minute aggregated data
     - > 7d: 1-hour aggregated data
     """
     if not query_api:
         raise HTTPException(status_code=503, detail="InfluxDB not available")
     
+    # Validate inputs to prevent Flux injection
+    start = validate_duration(start, "start")
+    stop = validate_stop(stop)
+    
     user_id = current_user["id"]
     
     # Select appropriate bucket based on time range
     bucket, field_suffix, default_interval = get_bucket_for_time_range(start)
-    use_interval = interval or default_interval
+    use_interval = validate_interval(interval) if interval else default_interval
     
     # For hourly bucket, use the pre-aggregated avg field
     field_name = f"usage_percent{field_suffix}" if field_suffix else "usage_percent"
@@ -578,11 +657,15 @@ async def get_memory_history(
     if not query_api:
         raise HTTPException(status_code=503, detail="InfluxDB not available")
     
+    # Validate inputs to prevent Flux injection
+    start = validate_duration(start, "start")
+    stop = validate_stop(stop)
+    
     user_id = current_user["id"]
     
     # Select appropriate bucket based on time range
     bucket, field_suffix, default_interval = get_bucket_for_time_range(start)
-    use_interval = interval or default_interval
+    use_interval = validate_interval(interval) if interval else default_interval
     field_name = f"used_percent{field_suffix}" if field_suffix else "used_percent"
     
     query = f'''
@@ -631,12 +714,19 @@ async def get_disk_history(
     if not query_api:
         raise HTTPException(status_code=503, detail="InfluxDB not available")
     
+    # Validate inputs to prevent Flux injection
+    start = validate_duration(start, "start")
+    stop = validate_stop(stop)
+    
     user_id = current_user["id"]
     
     # Select appropriate bucket based on time range
     bucket, field_suffix, default_interval = get_bucket_for_time_range(start)
-    use_interval = interval or default_interval
+    use_interval = validate_interval(interval) if interval else default_interval
     field_name = f"percent{field_suffix}" if field_suffix else "percent"
+    # Sanitize mountpoint to prevent injection (allow alphanumeric, /, \, :, _, -)
+    if mountpoint and not re.match(r'^[a-zA-Z0-9/_:\\\-]+$', mountpoint):
+        raise HTTPException(status_code=400, detail="Invalid mountpoint format")
     mountpoint_filter = f'|> filter(fn: (r) => r["mountpoint"] == "{mountpoint}")' if mountpoint else ""
     
     query = f'''
@@ -683,11 +773,15 @@ async def get_network_history(
     if not query_api:
         raise HTTPException(status_code=503, detail="InfluxDB not available")
     
+    # Validate inputs to prevent Flux injection
+    start = validate_duration(start, "start")
+    stop = validate_stop(stop)
+    
     user_id = current_user["id"]
     
     # Select appropriate bucket based on time range
     bucket, _, default_interval = get_bucket_for_time_range(start)
-    use_interval = interval or default_interval
+    use_interval = validate_interval(interval) if interval else default_interval
     
     query = f'''
     from(bucket: "{bucket}")
@@ -736,10 +830,18 @@ async def get_summary(
     if not query_api:
         raise HTTPException(status_code=503, detail="InfluxDB not available")
     
+    # Validate inputs to prevent Flux injection
+    start = validate_duration(start, "start")
+    stop = validate_stop(stop)
+    
     user_id = current_user["id"]
     
     # Select appropriate bucket based on time range
     bucket, field_suffix, _ = get_bucket_for_time_range(start)
+    
+    # Use correct field names based on bucket (hourly bucket has _avg suffix)
+    cpu_field = f"usage_percent{field_suffix}" if field_suffix else "usage_percent"
+    mem_field = f"used_percent{field_suffix}" if field_suffix else "used_percent"
     
     try:
         # CPU stats
@@ -749,7 +851,7 @@ async def get_summary(
             |> filter(fn: (r) => r["_measurement"] == "cpu")
             |> filter(fn: (r) => r["agent_id"] == "{agent_id}")
             |> filter(fn: (r) => r["user_id"] == "{user_id}")
-            |> filter(fn: (r) => r["_field"] == "usage_percent")
+            |> filter(fn: (r) => r["_field"] == "{cpu_field}")
         '''
         
         cpu_tables = query_api.query(cpu_query, org=INFLUXDB_ORG)
@@ -762,7 +864,7 @@ async def get_summary(
             |> filter(fn: (r) => r["_measurement"] == "memory")
             |> filter(fn: (r) => r["agent_id"] == "{agent_id}")
             |> filter(fn: (r) => r["user_id"] == "{user_id}")
-            |> filter(fn: (r) => r["_field"] == "used_percent")
+            |> filter(fn: (r) => r["_field"] == "{mem_field}")
         '''
         
         mem_tables = query_api.query(mem_query, org=INFLUXDB_ORG)

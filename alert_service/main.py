@@ -11,18 +11,28 @@ import os
 import time
 from telegram_bot import send_telegram_message
 import requests
-import redis
 
 app = FastAPI()
 
 # Create tables
 models.Base.metadata.create_all(bind=database.engine)
 
-# Kafka configuration
+# Configuration
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC = "metrics"
 KAFKA_GROUP_ID = "alert-service"
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth-service:8000")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Cache for rules to avoid DB hits on every metric
 # Structure: {agent_id: [rule1, rule2, ...]}
@@ -31,10 +41,6 @@ RULES_CACHE = {}
 # Structure: {user_id: chat_id}
 RECIPIENTS_CACHE = {}
 
-# Redis for caching latest metrics per agent
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-redis_client = None
 # Cooldown tracker: {"rule_id:metric_type": last_triggered_timestamp}
 # Each metric type (cpu, memory, disk) has its own cooldown timer per rule
 COOLDOWN_TRACKER = {}
@@ -52,8 +58,11 @@ def get_current_user(authorization: Optional[str] = Header(None)):
         )
         if response.status_code != 200:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return response.json()
-    except Exception as e:
+        user_data = response.json()
+        # Store the original authorization header for downstream calls
+        user_data["_authorization"] = authorization
+        return user_data
+    except requests.RequestException as e:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
 def refresh_caches():
@@ -143,6 +152,7 @@ def check_metrics(data):
             msg += f"Threshold: {'>' if rule['condition'] == 'gt' else '<'} {rule['threshold']}%\n"
             
             # Log to history regardless of telegram delivery
+            db = None
             try:
                 db = database.SessionLocal()
                 history = models.AlertHistory(
@@ -158,9 +168,11 @@ def check_metrics(data):
                 )
                 db.add(history)
                 db.commit()
-                db.close()
             except Exception as e:
                 print(f"Error logging alert history: {e}")
+            finally:
+                if db:
+                    db.close()
             
             if chat_id and send_telegram_message(chat_id, msg):
                 COOLDOWN_TRACKER[cooldown_key] = time.time()
@@ -206,100 +218,8 @@ def kafka_listener():
                 except:
                     pass
 
-def check_rule_immediately(rule_dict: dict, user_id: int):
-    """
-    Check a newly created rule against the cached latest metrics.
-    This ensures alerts fire immediately if the condition is already met.
-    """
-    if not redis_client:
-        return
-    
-    agent_id = str(rule_dict["agent_id"])
-    cache_key = f"metrics:{agent_id}"
-    
-    try:
-        cached_data = redis_client.get(cache_key)
-        if not cached_data:
-            return
-        
-        data = json.loads(cached_data)
-        
-        # Verify this data belongs to the same user
-        if data.get("user_id") != user_id:
-            return
-        
-        # Extract current value based on metric type
-        current_value = 0
-        if rule_dict["metric_type"] == "cpu":
-            current_value = data.get("cpu", {}).get("usage_percent", 0)
-        elif rule_dict["metric_type"] == "memory":
-            mem = data.get("memory", {})
-            current_value = mem.get("used_percent", mem.get("usage_percent", mem.get("percent", 0)))
-        elif rule_dict["metric_type"] == "disk":
-            # Disk metrics are in partitions array - use max across all partitions
-            disk = data.get("disk", {})
-            partitions = disk.get("partitions", [])
-            if partitions:
-                current_value = max(p.get("percent", 0) for p in partitions)
-            else:
-                # Fallback for flat structure
-                current_value = disk.get("usage_percent", disk.get("percent", 0))
-        
-        # Evaluate condition
-        triggered = False
-        if rule_dict["condition"] == "gt" and current_value > rule_dict["threshold"]:
-            triggered = True
-        elif rule_dict["condition"] == "lt" and current_value < rule_dict["threshold"]:
-            triggered = True
-        
-        if triggered:
-            chat_id = RECIPIENTS_CACHE.get(user_id)
-            agent_name = data.get("agent_name", "Unknown Agent")
-            msg = f"🚨 *Alert for {agent_name}*\n\n"
-            msg += f"Metric: {rule_dict['metric_type'].upper()}\n"
-            msg += f"Current Value: {current_value:.1f}%\n"
-            msg += f"Threshold: {'>' if rule_dict['condition'] == 'gt' else '<'} {rule_dict['threshold']}%\n"
-            msg += f"\n_Alert triggered immediately on rule creation_"
-            
-            # Log to history
-            try:
-                db = database.SessionLocal()
-                history = models.AlertHistory(
-                    user_id=user_id,
-                    rule_id=rule_dict["id"],
-                    agent_id=str(rule_dict["agent_id"]),
-                    agent_name=agent_name,
-                    metric_type=rule_dict["metric_type"],
-                    condition=rule_dict["condition"],
-                    threshold=rule_dict["threshold"],
-                    value=current_value,
-                    message=msg
-                )
-                db.add(history)
-                db.commit()
-                db.close()
-            except Exception as e:
-                print(f"Error logging alert history: {e}")
-            
-            cooldown_key = f"{rule_dict['id']}:{rule_dict['metric_type']}"
-            if chat_id and send_telegram_message(chat_id, msg):
-                COOLDOWN_TRACKER[cooldown_key] = time.time()
-            else:
-                COOLDOWN_TRACKER[cooldown_key] = time.time()
-    except Exception as e:
-        print(f"Error checking rule immediately: {e}")
-
 @app.on_event("startup")
 async def startup_event():
-    global redis_client
-    try:
-        redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-        redis_client.ping()
-        print(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
-    except Exception as e:
-        print(f"Warning: Could not connect to Redis: {e}")
-        redis_client = None
-    
     refresh_caches()
     # Start Kafka consumer in background thread
     thread = threading.Thread(target=kafka_listener, daemon=True)
@@ -325,33 +245,31 @@ def create_rule(
     db: Session = Depends(database.get_db)
 ):
     # Verify agent ownership via auth service
+    # Use the original authorization header stored in current_user
+    auth_header = current_user.get("_authorization", "")
     try:
         response = requests.get(
             f"{AUTH_SERVICE_URL}/agents/{rule.agent_id}",
-            headers={"Authorization": f"Bearer {current_user.get('_token', '')}"}
+            headers={"Authorization": auth_header},
+            timeout=5
         )
-        # If auth service returns 404 or agent doesn't belong to user, reject
+        # If auth service returns 404 or 401/403, reject the request
         if response.status_code == 404:
             raise HTTPException(status_code=404, detail="Agent not found or does not belong to you")
+        if response.status_code in (401, 403):
+            raise HTTPException(status_code=403, detail="Not authorized to create rules for this agent")
+        if response.status_code != 200:
+            # Unexpected error - fail closed for security
+            raise HTTPException(status_code=503, detail="Unable to verify agent ownership")
     except requests.RequestException:
-        # If auth service is unreachable, allow creation (degraded mode)
-        # In production, you might want to fail closed instead
-        pass
+        # If auth service is unreachable, fail closed for security
+        raise HTTPException(status_code=503, detail="Auth service unavailable - cannot verify agent ownership")
     
     db_rule = models.AlertRule(**rule.dict(), user_id=current_user["id"])
     db.add(db_rule)
     db.commit()
     db.refresh(db_rule)
     refresh_caches()
-    
-    # Immediately check if alert should fire based on cached metrics
-    check_rule_immediately({
-        "id": db_rule.id,
-        "agent_id": db_rule.agent_id,
-        "metric_type": db_rule.metric_type,
-        "condition": db_rule.condition,
-        "threshold": db_rule.threshold
-    }, current_user["id"])
     
     return db_rule
 
@@ -409,6 +327,12 @@ def get_alert_history(
     db: Session = Depends(database.get_db)
 ):
     """Get alert history with optional filtering"""
+    # Validate limit and offset to prevent DoS
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=400, detail="Limit must be between 1 and 1000")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="Offset must be non-negative")
+    
     query = db.query(models.AlertHistory).filter(
         models.AlertHistory.user_id == current_user["id"]
     )
