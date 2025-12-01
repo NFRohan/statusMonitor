@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request, Header
 from typing import Optional
 from aiokafka import AIOKafkaProducer
-import redis
 import json
 import os
 import httpx
@@ -21,23 +20,10 @@ app.add_middleware(
 # Kafka configuration
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC = "metrics"
-
-# Redis for caching (optional)
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://localhost:8000")
 
 # Kafka producer (initialized at startup)
 kafka_producer: Optional[AIOKafkaProducer] = None
-
-# Redis client for caching
-try:
-    redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-    redis_client.ping()
-    print(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT} for caching")
-except redis.ConnectionError:
-    print(f"Could not connect to Redis at {REDIS_HOST}:{REDIS_PORT}")
-    redis_client = None
 
 async def validate_agent_token(token: str) -> dict:
     """Validate agent token with auth service"""
@@ -134,23 +120,13 @@ async def ingest_metrics(
     except Exception as e:
         print(f"Error publishing to Kafka: {e}")
         raise HTTPException(status_code=503, detail="Failed to publish metrics")
-    
-    # Cache latest metrics in Redis (optional, for quick lookups)
-    if redis_client:
-        try:
-            cache_key = f"latest_metrics:{token_info['agent_id']}"
-            redis_client.setex(cache_key, 60, json.dumps(data))  # 60 second TTL
-        except redis.ConnectionError:
-            pass  # Caching is optional, don't fail if Redis is down
             
     return {"status": "received"}
 
 @app.get("/health")
 def health():
     kafka_status = "connected" if kafka_producer else "disconnected"
-    redis_status = "connected" if redis_client and redis_client.ping() else "disconnected"
     return {
         "status": "ok",
-        "kafka": kafka_status,
-        "redis_cache": redis_status
+        "kafka": kafka_status
     }

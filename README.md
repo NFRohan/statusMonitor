@@ -9,6 +9,7 @@
   <img src="https://img.shields.io/badge/FastAPI-0.115-green?logo=fastapi" alt="FastAPI">
   <img src="https://img.shields.io/badge/PostgreSQL-16-blue?logo=postgresql" alt="PostgreSQL 16">
   <img src="https://img.shields.io/badge/InfluxDB-2.7-purple?logo=influxdb" alt="InfluxDB">
+  <img src="https://img.shields.io/badge/Kafka-7.5-black?logo=apachekafka" alt="Apache Kafka">
   <img src="https://img.shields.io/badge/Docker-Compose-blue?logo=docker" alt="Docker Compose">
 </p>
 
@@ -21,19 +22,19 @@
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
 - [Deployment](#deployment)
-  - [Development Setup](#development-setup)
-  - [Production Deployment](#production-deployment)
 - [Agent Setup](#agent-setup)
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
+- [Alerting Setup](#alerting-setup)
 - [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
 - [License](#license)
 
 ---
 
 ## Overview
 
-StatusMonitor is a comprehensive system monitoring solution that collects, stores, and visualizes real-time metrics from multiple machines. It features a modern React dashboard with interactive charts, WebSocket-based live updates, and historical data analysis.
+StatusMonitor is a comprehensive system monitoring solution that collects, stores, and visualizes real-time metrics from multiple machines. It features a modern React dashboard with interactive charts, WebSocket-based live updates, and historical data analysis powered by Apache Kafka for reliable event streaming.
 
 <p align="center">
   <img src="screenshots/HomePage.png" alt="Home Page" width="80%">
@@ -50,13 +51,19 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 <p align="center">
   <img src="screenshots/agent Registration.png" alt="Agent Registration" width="80%">
   <br>
-  <em>Agent Registration - Create and Register monitoring agents</em>
+  <em>Agent Registration - Create and register monitoring agents</em>
 </p>
 
 <p align="center">
   <img src="screenshots/alerts.png" alt="Alerts" width="80%">
   <br>
   <em>Alerts - Configure threshold-based Telegram notifications</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/telegramAlert.png" alt="Telegram Alert" width="50%">
+  <br>
+  <em>Telegram Alert - Real-time notification when threshold is breached</em>
 </p>
 
 <p align="center">
@@ -71,10 +78,10 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 |-----------|------------|---------|
 | **Frontend** | React 19 + Vite + Tailwind CSS | Interactive web dashboard |
 | **Auth Service** | FastAPI + PostgreSQL | User authentication & agent management |
-| **Ingestion Service** | FastAPI + Redis | Metrics collection endpoint |
-| **Distribution Service** | FastAPI + WebSocket | Real-time data broadcast |
-| **History Service** | FastAPI + InfluxDB | Time-series storage & queries |
-| **Alert Service** | FastAPI + Telegram | Threshold-based alerting |
+| **Ingestion Service** | FastAPI + Kafka | Metrics collection & event streaming |
+| **Distribution Service** | FastAPI + WebSocket + Kafka | Real-time data broadcast |
+| **History Service** | FastAPI + InfluxDB + Kafka | Time-series storage with downsampling |
+| **Alert Service** | FastAPI + Kafka + Telegram | Threshold-based alerting with history |
 | **Agent** | Python + tkinter | Cross-platform metrics collector |
 
 ---
@@ -88,6 +95,15 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 - **Historical Analysis**: Query metrics over custom time ranges (5m, 1h, 24h, 7d)
 - **Multi-Agent Support**: Monitor multiple machines from a single dashboard
 
+### 📊 Data Pipeline
+- **Kafka Event Streaming**: Durable message queue with 24-hour retention
+- **Tiered Storage**: Three retention tiers for optimal storage efficiency
+  - Raw data (5s resolution) → 24 hours
+  - 1-minute aggregates → 7 days
+  - 1-hour aggregates → 1 year
+- **Automatic Downsampling**: InfluxDB tasks aggregate data between tiers
+- **Smart Query Routing**: API automatically selects optimal data bucket based on time range
+
 ### 🔐 Security
 - **JWT Authentication**: Secure token-based auth with refresh tokens
 - **Argon2 Password Hashing**: Industry-standard password security
@@ -96,10 +112,8 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 - **One-Time Activation**: Tokens become permanent only after first successful connection
 - **WebSocket Authentication**: Real-time connections require valid JWT tokens
 - **Data Isolation**: Users can only access their own agents' metrics and history
-- **Alert Rule Ownership**: Alert rules and notifications are scoped to the owning user
-- **Resilient Connections**: Automatic reconnection with exponential backoff for Redis pub/sub
 
-### 📊 Agent
+### 📱 Agent
 - **Cross-Platform**: Windows, Linux, and macOS support
 - **GUI Application**: User-friendly tkinter interface
 - **Real CPU Frequency**: Windows PDH integration for accurate turbo boost readings
@@ -109,8 +123,9 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 ### 🔔 Alerting
 - **Telegram Notifications**: Instant alerts via Telegram bot
 - **Threshold Rules**: Configure CPU, memory, and disk thresholds per agent
-- **Cooldown Protection**: 5-minute cooldown prevents notification spam
-- **Easy Setup**: Configure via web dashboard
+- **Per-Metric Cooldown**: Separate 5-minute cooldown timers for each metric type
+- **Immediate Triggering**: Alerts fire instantly if threshold already exceeded when rule is created
+- **Alert History**: Full log of all fired alerts with filtering and sorting
 
 ---
 
@@ -130,31 +145,37 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 │  │ Auth Service │  │  Ingestion   │  │ Distribution │  │   History    │ │
 │  │    :8000     │  │    :8001     │  │    :8002     │  │    :8003     │ │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘ │
-│                                                                          │
-│                           ┌──────────────┐                               │
-│                           │Alert Service │                               │
-│                           │    :8004     │───────► Telegram              │
-│                           └──────────────┘                               │
-└─────────┼─────────────────┼─────────────────┼─────────────────┼─────────┘
-          │                 │                 │                 │
-          ▼                 ▼                 ▼                 ▼
-┌──────────────┐    ┌──────────────┐                    ┌──────────────┐
-│  PostgreSQL  │    │    Redis     │◄──────────────────►│   InfluxDB   │
-│    :5432     │    │    :6379     │   Pub/Sub          │    :8086     │
-└──────────────┘    └──────────────┘                    └──────────────┘
-
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          MONITORING AGENTS                               │
-│         ┌──────────┐    ┌──────────┐    ┌──────────┐                    │
-│         │ Agent 1  │    │ Agent 2  │    │ Agent N  │                    │
-│         │(Windows) │    │ (Linux)  │    │ (macOS)  │                    │
-│         └────┬─────┘    └────┬─────┘    └────┬─────┘                    │
-│              └───────────────┴───────────────┘                          │
-│                              │ POST /ingest                              │
-│                              ▼                                           │
-│                      Ingestion Service                                   │
-└─────────────────────────────────────────────────────────────────────────┘
+│         │                 │                 │                 │          │
+│         │                 └────────┬────────┴─────────────────┘          │
+│         │                          │                                     │
+│         │                 ┌────────▼────────┐                            │
+│         │                 │     KAFKA       │                            │
+│         │                 │  (Event Stream) │                            │
+│         │                 └────────┬────────┘                            │
+│         │                          │                                     │
+│         │                 ┌────────▼────────┐                            │
+│         │                 │ Alert Service   │───────► Telegram           │
+│         │                 │    :8004        │                            │
+│         │                 └─────────────────┘                            │
+└─────────┼───────────────────────────────────────────────────────────────┘
+          │                          
+          ▼                          
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│  PostgreSQL  │    │    Redis     │    │    Kafka     │    │   InfluxDB   │
+│    :5432     │    │    :6379     │    │    :9092     │    │    :8086     │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
 ```
+
+### Data Flow
+
+1. **Agents** collect metrics every 5 seconds and POST to Ingestion Service
+2. **Ingestion Service** publishes metrics to Kafka topic `metrics`
+3. **Kafka** provides durable message streaming with 24-hour retention
+4. **Consumers** (Distribution, History, Alert) process messages independently:
+   - **Distribution Service**: Broadcasts to WebSocket clients in real-time
+   - **History Service**: Stores in InfluxDB tiered buckets with automatic downsampling
+   - **Alert Service**: Checks threshold rules and sends Telegram notifications
+5. **Redis** caches latest metrics per agent for immediate alert rule evaluation
 
 ---
 
@@ -177,16 +198,12 @@ cd statusmonitor
 
 **Windows (PowerShell):**
 ```powershell
-.\start-docker.ps1              # Development mode (all ports exposed)
-# or
-.\start-docker.ps1 -Prod        # Production mode (minimal ports)
-.\start-docker.ps1 -NoBuild     # Skip build step (faster restart)
+.\start-docker.ps1
 ```
 
 **Linux/macOS:**
 ```bash
-docker-compose up -d                                              # Development
-docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d  # Production
+docker-compose up -d
 ```
 
 ### 3. Access the Dashboard
@@ -204,222 +221,103 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 ### 5. Run the Agent
 
 ```bash
-# Install dependencies
 pip install psutil requests
-
-# Run the agent
 python agent_service/gui_agent.py
 ```
 
 In the agent GUI:
 1. Go to **Settings** tab
 2. Paste your agent token
-3. Click **Save Settings**
-4. Click **Start Agent**
+3. Click **Save Settings** → **Start Agent**
 
 ---
 
 ## Deployment
 
-### Development Setup
+### Development Mode
 
-Development mode exposes all service ports for debugging:
+Exposes all service ports for debugging:
 
-**Windows (PowerShell):**
 ```powershell
-# Start services (creates .env from template if missing)
+# Windows
 .\start-docker.ps1
 
-# View logs
-docker-compose logs -f
-
-# Stop services (preserves data)
-.\stop-docker.ps1
-
-# Stop and remove all data
-.\stop-docker.ps1 -Clean
-```
-
-**Linux/macOS:**
-```bash
-# Copy environment template
-cp .env.example .env
-
-# Start services
+# Linux/macOS
 docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop services
-docker-compose down
-
-# Stop and remove volumes
-docker-compose down -v
 ```
 
-**Development Ports:**
+**Available Ports:**
 
-| Service | Port | URL |
-|---------|------|-----|
-| Frontend | 5173 | http://localhost:5173 |
-| Auth Service | 8000 | http://localhost:8000 |
-| Ingestion Service | 8001 | http://localhost:8001 |
-| Distribution Service | 8002 | http://localhost:8002 |
-| History Service | 8003 | http://localhost:8003 |
-| Alert Service | 8004 | http://localhost:8004 |
-| PostgreSQL | 5432 | localhost:5432 |
-| Redis | 6379 | localhost:6379 |
-| InfluxDB | 8086 | http://localhost:8086 |
+| Service | Port |
+|---------|------|
+| Frontend | 5173 |
+| Auth Service | 8000 |
+| Ingestion Service | 8001 |
+| Distribution Service | 8002 |
+| History Service | 8003 |
+| Alert Service | 8004 |
+| PostgreSQL | 5432 |
+| Redis | 6379 |
+| Kafka | 9092 |
+| InfluxDB | 8086 |
 
-### Production Deployment
+### Production Mode
 
-Production mode restricts exposed ports and uses secure configurations.
+Restricts exposed ports for security:
 
-#### Step 1: Configure Environment
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` with secure values:
-
-```env
-# Generate strong passwords
-POSTGRES_PASSWORD=your-secure-postgres-password
-INFLUXDB_ADMIN_PASSWORD=your-secure-influxdb-password
-
-# Generate secure tokens
-SECRET_KEY=your-64-character-secret-key
-INFLUXDB_TOKEN=your-secure-influxdb-token
-```
-
-**Generate a secure SECRET_KEY:**
-```bash
-python -c "import secrets; print(secrets.token_hex(32))"
-```
-
-#### Step 2: Deploy with Production Overrides
-
-**Windows (PowerShell):**
 ```powershell
+# Windows
 .\start-docker.ps1 -Prod
-```
 
-**Linux/macOS:**
-```bash
+# Linux/macOS
 docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
-> **Note**: The `docker-compose.yml` file contains all build definitions. The `docker-compose.prod.yml` is an override file that only modifies runtime settings (ports, restart policies). Images are always built from the base file.
+**Production Ports:**
+- Frontend: 80, 443
+- Ingestion Service: 8001 (for external agents)
 
-**Production Ports (minimized exposure):**
+### Environment Configuration
 
-| Service | Port | Notes |
-|---------|------|-------|
-| Frontend | 80, 443 | Main entry point |
-| Ingestion Service | 8001 | For external agents |
-
-All other services are internal-only.
-
-#### Step 3: Configure HTTPS (Recommended)
-
-For HTTPS, add SSL certificates and configure nginx. Update `frontend/nginx.conf`:
-
-```nginx
-server {
-    listen 443 ssl;
-    ssl_certificate /etc/nginx/ssl/cert.pem;
-    ssl_certificate_key /etc/nginx/ssl/key.pem;
-    
-    # ... rest of config
-}
-```
-
-Or use a reverse proxy like Traefik or Caddy.
-
-#### Step 4: Set Up Firewall Rules
+Copy and edit the environment file:
 
 ```bash
-# Allow only necessary ports
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw allow 8001/tcp  # For agents outside the network
+cp .env.example .env
+```
+
+Generate a secure secret key:
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
 ---
 
 ## Agent Setup
 
-### Running from Source
+### GUI Agent (Desktop)
 
 ```bash
-# Install dependencies
 pip install -r agent_service/requirements-gui.txt
-
-# Run the GUI agent
 python agent_service/gui_agent.py
 ```
 
-### Building Standalone Executable (Windows)
-
-**Using the build script:**
-```powershell
-# Build with PyInstaller (recommended)
-.\build_agent.ps1
-
-# Output: dist/StatusMonitorAgent.exe
-```
-
-**Manual build steps:**
-```powershell
-# 1. Create and activate virtual environment
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-
-# 2. Install dependencies
-pip install -r agent_service/requirements-gui.txt
-pip install pyinstaller
-
-# 3. Build the executable
-pyinstaller --onefile --windowed --name StatusMonitorAgent agent_service/gui_agent.py
-
-# 4. (Optional) Add custom icon
-pyinstaller --onefile --windowed --name StatusMonitorAgent --icon agent_service/icon.ico agent_service/gui_agent.py
-```
-
-The executable will be created at `dist/StatusMonitorAgent.exe`. This is a standalone file that can be distributed to other Windows machines without requiring Python to be installed.
-
-### Agent Configuration
-
-The agent stores configuration in `~/.statusmonitor/agent_config.json`:
-
-- **Windows**: `C:\Users\<username>\.statusmonitor\agent_config.json`
-- **Linux/macOS**: `~/.statusmonitor/agent_config.json`
-
-```json
-{
-  "server_url": "http://localhost:8001",
-  "agent_token": "your-agent-token",
-  "interval": 5
-}
-```
-
-### Headless Agent (Server Mode)
-
-For servers without GUI:
+### Headless Agent (Server)
 
 ```bash
-cd agent_service
-pip install -r requirements.txt
-python main.py
-```
+pip install -r agent_service/requirements.txt
 
-Set environment variables:
-```bash
 export INGESTION_URL=http://your-server:8001
 export AGENT_TOKEN=your-token
 export COLLECTION_INTERVAL=5
+
+python agent_service/main.py
+```
+
+### Build Standalone Executable (Windows)
+
+```powershell
+.\build_agent.ps1
+# Output: dist/StatusMonitorAgent.exe
 ```
 
 ---
@@ -428,118 +326,56 @@ export COLLECTION_INTERVAL=5
 
 ### Auth Service (`:8000`)
 
-| Endpoint | Method | Description | Auth |
-|----------|--------|-------------|------|
-| `/register` | POST | Create new user | No |
-| `/token` | POST | Login (returns tokens) | No |
-| `/refresh` | POST | Refresh access token | Refresh Token |
-| `/users/me` | GET | Get current user info | Access Token |
-| `/agents` | GET | List user's agents | Access Token |
-| `/agents` | POST | Create new agent | Access Token |
-| `/agents/{id}` | DELETE | Delete an agent | Access Token |
-| `/agents/{id}/regenerate-token` | POST | Regenerate agent token | Access Token |
-| `/agents/validate-token` | POST | Validate agent token | Agent Token |
-| `/health` | GET | Health check | No |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/register` | POST | Create new user |
+| `/token` | POST | Login (returns JWT tokens) |
+| `/refresh` | POST | Refresh access token |
+| `/users/me` | GET | Get current user info |
+| `/agents` | GET/POST | List or create agents |
+| `/agents/{id}` | DELETE | Delete an agent |
+| `/agents/{id}/regenerate-token` | POST | Regenerate agent token |
 
 ### Ingestion Service (`:8001`)
 
-| Endpoint | Method | Description | Auth |
-|----------|--------|-------------|------|
-| `/ingest` | POST | Submit metrics | X-Agent-Token |
-| `/health` | GET | Health check | No |
-
-**Metrics Payload:**
-```json
-{
-  "cpu": {
-    "percent": 45.2,
-    "per_core_usage": [42.1, 48.3, 44.7, 45.8],
-    "freq": {
-      "current": 3600,
-      "min": 800,
-      "max": 4500
-    }
-  },
-  "memory": {
-    "percent": 67.5,
-    "used": 10737418240,
-    "total": 17179869184,
-    "available": 5368709120
-  },
-  "disk": {
-    "percent": 45.0,
-    "used": 214748364800,
-    "total": 500000000000,
-    "free": 285251635200
-  },
-  "network": {
-    "bytes_sent": 1073741824,
-    "bytes_recv": 5368709120,
-    "packets_sent": 1000000,
-    "packets_recv": 2000000
-  }
-}
-```
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/ingest` | POST | Submit metrics (requires `X-Agent-Token` header) |
 
 ### History Service (`:8003`)
 
-| Endpoint | Method | Description | Auth |
-|----------|--------|-------------|------|
-| `/history/{agent_id}/cpu` | GET | CPU history | Access Token |
-| `/history/{agent_id}/memory` | GET | Memory history | Access Token |
-| `/history/{agent_id}/disk` | GET | Disk history | Access Token |
-| `/history/{agent_id}/network` | GET | Network history | Access Token |
-| `/history/{agent_id}/summary` | GET | Summary stats | Access Token |
-| `/health` | GET | Health check | No |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/history/{agent_id}/cpu` | GET | CPU history |
+| `/history/{agent_id}/memory` | GET | Memory history |
+| `/history/{agent_id}/disk` | GET | Disk history |
+| `/history/{agent_id}/network` | GET | Network history |
+| `/history/{agent_id}/summary` | GET | Summary statistics |
 
-> **Note**: All history endpoints require JWT authentication and verify that the requested agent belongs to the authenticated user.
+**Query Parameters:**
+- `start`: Time range start (`-5m`, `-1h`, `-24h`, `-7d`)
+- `stop`: Time range end (default: `now()`)
+- `interval`: Aggregation interval (`1m`, `5m`, `30m`)
 
-**Time Range Parameters:**
-- `-5m` - Last 5 minutes
-- `-1h` - Last hour
-- `-24h` - Last 24 hours
-- `-7d` - Last 7 days
-- ISO 8601 timestamps
+**Automatic Bucket Selection:**
+- ≤24 hours → `metrics_raw` (5-second resolution)
+- 24h - 7 days → `metrics_1m` (1-minute resolution)
+- \>7 days → `metrics_1h` (1-hour resolution)
 
 ### Distribution Service (`:8002`)
 
-| Endpoint | Protocol | Description | Auth |
-|----------|----------|-------------|------|
-| `/ws/{agent_id}?token=<jwt>` | WebSocket | Real-time metrics stream | Access Token (query param) |
-| `/health` | HTTP GET | Health check | No |
-
-> **Note**: WebSocket connections require a valid JWT access token passed as a `token` query parameter. The service validates ownership of the requested agent before establishing the connection.
+| Endpoint | Protocol | Description |
+|----------|----------|-------------|
+| `/ws/{agent_id}?token=<jwt>` | WebSocket | Real-time metrics stream |
 
 ### Alert Service (`:8004`)
 
-| Endpoint | Method | Description | Auth |
-|----------|--------|-------------|------|
-| `/rules` | GET | List user's alert rules | Access Token |
-| `/rules` | POST | Create alert rule | Access Token |
-| `/rules/{id}` | DELETE | Delete alert rule | Access Token |
-| `/recipient` | GET | Get Telegram settings | Access Token |
-| `/recipient` | POST | Update Telegram settings | Access Token |
-| `/health` | GET | Health check | No |
-
-> **Security Notes**:
-> - Alert rules can only be created for agents owned by the authenticated user
-> - Metric threshold checks verify agent ownership before triggering alerts
-> - 5-minute cooldown between repeated alerts prevents notification spam
-
-**Alert Rule Payload:**
-```json
-{
-  "agent_id": "4",
-  "metric_type": "cpu",
-  "condition": "gt",
-  "threshold": 90.0,
-  "enabled": true
-}
-```
-
-- `metric_type`: `cpu`, `memory`, or `disk`
-- `condition`: `gt` (greater than) or `lt` (less than)
-- `threshold`: Percentage value (0-100)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/rules` | GET/POST | List or create alert rules |
+| `/rules/{id}` | DELETE | Delete alert rule |
+| `/recipient` | GET/POST | Get or update Telegram settings |
+| `/history` | GET/DELETE | Get or clear alert history |
 
 ---
 
@@ -547,73 +383,21 @@ export COLLECTION_INTERVAL=5
 
 ### Environment Variables
 
-All configuration is via environment variables. See `.env.example` for complete list:
-
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `POSTGRES_USER` | statusmonitor | Database username |
 | `POSTGRES_PASSWORD` | statusmonitor | Database password |
-| `POSTGRES_DB` | statusmonitor | Database name |
 | `SECRET_KEY` | (required) | JWT signing key |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | 30 | Access token TTL |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | 7 | Refresh token TTL |
-| `REDIS_HOST` | redis | Redis hostname |
+| `KAFKA_BOOTSTRAP_SERVERS` | kafka:29092 | Kafka broker address |
 | `INFLUXDB_TOKEN` | (required) | InfluxDB admin token |
-| `INFLUXDB_ORG` | statusmonitor | InfluxDB organization |
-| `INFLUXDB_BUCKET` | metrics | InfluxDB bucket name |
-| `TELEGRAM_BOT_TOKEN` | (optional) | Telegram bot token for alerts |
+| `TELEGRAM_BOT_TOKEN` | (optional) | Telegram bot for alerts |
 
----
+### InfluxDB Buckets
 
-## Troubleshooting
-
-### Services Not Starting
-
-```bash
-# Check service status
-docker-compose ps
-
-# View logs for specific service
-docker-compose logs auth-service
-docker-compose logs ingestion-service
-```
-
-### Database Connection Issues
-
-```bash
-# Check PostgreSQL is healthy
-docker exec statusmonitor-postgres pg_isready
-
-# Connect to database
-docker exec -it statusmonitor-postgres psql -U statusmonitor
-```
-
-### Agent Can't Connect
-
-1. Verify ingestion service is running: `curl http://localhost:8001/health`
-2. Check agent token is valid and not expired (5-minute window for new tokens)
-3. If token expired, regenerate from the Agents page in dashboard
-4. Verify firewall allows connection to port 8001
-5. Check agent logs in GUI console
-
-### Reset All Data
-
-```bash
-# Stop and remove all containers and volumes
-docker-compose down -v
-
-# Restart fresh
-docker-compose up -d
-```
-
-### Health Check Endpoints
-
-All services expose `/health`:
-- Auth: http://localhost:8000/health
-- Ingestion: http://localhost:8001/health
-- Distribution: http://localhost:8002/health
-- History: http://localhost:8003/health
-- Alert: http://localhost:8004/health
+| Bucket | Retention | Resolution |
+|--------|-----------|------------|
+| `metrics_raw` | 24 hours | 5 seconds |
+| `metrics_1m` | 7 days | 1 minute |
+| `metrics_1h` | 1 year | 1 hour |
 
 ---
 
@@ -621,41 +405,66 @@ All services expose `/health`:
 
 ### 1. Create a Telegram Bot
 
-1. Open Telegram and search for [@BotFather](https://t.me/botfather)
-2. Send `/newbot` and follow the prompts
-3. Copy the **Bot Token** (looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+1. Message [@BotFather](https://t.me/botfather) on Telegram
+2. Send `/newbot` and follow prompts
+3. Copy the **Bot Token**
 
 ### 2. Configure the Token
 
-Add the token to your `.env` file:
+Add to `.env`:
 ```env
-TELEGRAM_BOT_TOKEN=your-bot-token-here
+TELEGRAM_BOT_TOKEN=your-bot-token
 ```
 
-Restart the alert service:
+Restart alert service:
 ```bash
 docker-compose up -d alert-service
 ```
 
 ### 3. Get Your Chat ID
 
-1. Start a chat with your new bot on Telegram
-2. Send any message to the bot
-3. Visit: `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
-4. Find your Chat ID in the response: `"chat":{"id":123456789}`
+1. Start a chat with your bot
+2. Send any message
+3. Visit: `https://api.telegram.org/bot<TOKEN>/getUpdates`
+4. Find `"chat":{"id":123456789}`
 
-Alternatively, message [@userinfobot](https://t.me/userinfobot) to get your ID.
+### 4. Configure in Dashboard
 
-### 4. Configure Alerts in Dashboard
+1. Go to **Alerts** page
+2. Enter your **Chat ID**
+3. Create alert rules with thresholds
 
-1. Go to the **Alerts** page in the dashboard
-2. Enter your **Chat ID** and save
-3. Create alert rules:
-   - Select an agent
-   - Choose metric type (CPU, Memory, Disk)
-   - Set condition (Greater Than / Less Than)
-   - Set threshold percentage
-4. Alerts will be sent when thresholds are breached (5-minute cooldown between alerts)
+---
+
+## Troubleshooting
+
+### View Service Logs
+
+```bash
+docker-compose logs -f <service-name>
+```
+
+### Health Checks
+
+All services expose `/health`:
+- http://localhost:8000/health (Auth)
+- http://localhost:8001/health (Ingestion)
+- http://localhost:8002/health (Distribution)
+- http://localhost:8003/health (History)
+- http://localhost:8004/health (Alert)
+
+### Reset All Data
+
+```bash
+docker-compose down -v
+docker-compose up -d
+```
+
+### Agent Connection Issues
+
+1. Verify ingestion service: `curl http://localhost:8001/health`
+2. Check token validity (5-minute expiration for new tokens)
+3. Regenerate token from Agents page if expired
 
 ---
 
@@ -664,40 +473,19 @@ Alternatively, message [@userinfobot](https://t.me/userinfobot) to get your ID.
 ```
 statusmonitor/
 ├── agent_service/          # Python monitoring agent
-│   ├── gui_agent.py        # GUI application (tkinter)
+│   ├── gui_agent.py        # GUI application
 │   ├── main.py             # Headless agent
-│   ├── metrics.py          # Metrics collection
-│   └── requirements*.txt   # Python dependencies
-├── auth_service/           # Authentication microservice
-│   ├── main.py             # FastAPI application
-│   ├── auth.py             # JWT handling
-│   ├── database.py         # SQLAlchemy models
-│   └── Dockerfile
-├── distribution_service/   # WebSocket distribution
-│   ├── main.py
-│   └── Dockerfile
-├── history_service/        # InfluxDB integration
-│   ├── main.py
-│   └── Dockerfile
+│   └── metrics.py          # Metrics collection
+├── auth_service/           # Authentication service
+├── distribution_service/   # WebSocket broadcasting
+├── history_service/        # InfluxDB storage
+│   └── influxdb_setup.py   # Bucket & downsampling setup
 ├── alert_service/          # Telegram alerting
-│   ├── main.py
-│   ├── telegram_bot.py
-│   └── Dockerfile
-├── ingestion_service/      # Metrics ingestion
-│   ├── main.py
-│   └── Dockerfile
+├── ingestion_service/      # Metrics ingestion + Kafka producer
 ├── frontend/               # React dashboard
-│   ├── src/
-│   │   ├── pages/          # Dashboard, Agents, Login
-│   │   └── context/        # Auth context
-│   ├── nginx.conf          # Production nginx config
-│   └── Dockerfile
 ├── docker-compose.yml      # Development config
 ├── docker-compose.prod.yml # Production overrides
-├── .env.example            # Environment template
-├── start-docker.ps1        # Windows startup script
-├── stop-docker.ps1         # Windows stop script
-└── build_agent.ps1         # Agent build script
+└── .env.example            # Environment template
 ```
 
 ---
@@ -709,5 +497,5 @@ MIT License - See [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  Built with ❤️ using FastAPI, React, and Docker
+  Built with ❤️ using FastAPI, React, Kafka, and Docker
 </p>
