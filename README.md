@@ -132,50 +132,88 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              FRONTEND                                    │
-│                        (React + Vite + Nginx)                           │
-│                          http://localhost:5173                          │
-└─────────────────────┬───────────────────────────────────────────────────┘
-                      │ REST API / WebSocket
-                      ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           BACKEND SERVICES                               │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │ Auth Service │  │  Ingestion   │  │ Distribution │  │   History    │ │
-│  │    :8000     │  │    :8001     │  │    :8002     │  │    :8003     │ │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘ │
-│         │                 │                 │                 │          │
-│         │                 └────────┬────────┴─────────────────┘          │
-│         │                          │                                     │
-│         │                 ┌────────▼────────┐                            │
-│         │                 │     KAFKA       │                            │
-│         │                 │  (Event Stream) │                            │
-│         │                 └────────┬────────┘                            │
-│         │                          │                                     │
-│         │                 ┌────────▼────────┐                            │
-│         │                 │ Alert Service   │───────► Telegram           │
-│         │                 │    :8004        │                            │
-│         │                 └─────────────────┘                            │
-└─────────┼───────────────────────────────────────────────────────────────┘
-          │                          
-          ▼                          
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│  PostgreSQL  │    │    Redis     │    │    Kafka     │    │   InfluxDB   │
-│    :5432     │    │    :6379     │    │    :9092     │    │    :8086     │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+                              ┌─────────────────┐
+                              │   MONITORING    │
+                              │     AGENTS      │
+                              │  (Python/GUI)   │
+                              └────────┬────────┘
+                                       │ POST /ingest
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              FRONTEND                                         │
+│                    React 19 + Vite + Tailwind CSS                            │
+│                        http://localhost:5173                                  │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐             │
+│  │ Dashboard  │  │   Agents   │  │   Alerts   │  │   Login    │             │
+│  └────────────┘  └────────────┘  └────────────┘  └────────────┘             │
+└──────────────────────────┬───────────────────────────────────────────────────┘
+                           │ REST API / WebSocket
+                           ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           MICROSERVICES                                       │
+│                                                                               │
+│  ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐       │
+│  │  Auth Service   │      │Ingestion Service│      │  Distribution   │       │
+│  │     :8000       │      │     :8001       │      │    Service      │       │
+│  │                 │      │                 │      │     :8002       │       │
+│  │  • JWT Auth     │      │  • Validate     │      │                 │       │
+│  │  • User Mgmt    │      │    Agent Token  │      │  • WebSocket    │       │
+│  │  • Agent Tokens │      │  • Kafka Pub    │      │  • Real-time    │       │
+│  └────────┬────────┘      └────────┬────────┘      └────────┬────────┘       │
+│           │                        │                        │                 │
+│           │                        ▼                        │                 │
+│           │               ┌─────────────────┐               │                 │
+│           │               │                 │               │                 │
+│           │               │     KAFKA       │◄──────────────┤                 │
+│           │               │   :9092         │               │                 │
+│           │               │                 │               │                 │
+│           │               │  Topic: metrics │               │                 │
+│           │               │  Retention: 24h │               │                 │
+│           │               └───────┬─────────┘               │                 │
+│           │                       │                         │                 │
+│           │          ┌────────────┼────────────┐            │                 │
+│           │          │            │            │            │                 │
+│           │          ▼            ▼            ▼            │                 │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐           │
+│  │ History Service │    │  Alert Service  │    │   (Consumers)   │           │
+│  │     :8003       │    │     :8004       │    │                 │           │
+│  │                 │    │                 │    │                 │           │
+│  │  • Kafka Sub    │    │  • Kafka Sub    │    │                 │           │
+│  │  • Time-series  │    │  • Threshold    │    │                 │           │
+│  │  • Downsampling │    │  • Telegram Bot │    │                 │           │
+│  │  • Smart Query  │    │  • Alert History│    │                 │           │
+│  └────────┬────────┘    └───────┬─────────┘    └─────────────────┘           │
+│           │                     │                                             │
+└───────────┼─────────────────────┼─────────────────────────────────────────────┘
+            │                     │
+            ▼                     ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                            DATA STORES                                        │
+│                                                                               │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐               │
+│  │   PostgreSQL    │  │    InfluxDB     │  │     Redis       │               │
+│  │     :5432       │  │     :8086       │  │     :6379       │               │
+│  │                 │  │                 │  │                 │               │
+│  │  • Users        │  │  • metrics_raw  │  │  • Metric Cache │  ──► Telegram │
+│  │  • Agents       │  │    (24h, 5s)    │  │    (for alerts) │               │
+│  │  • Alert Rules  │  │  • metrics_1m   │  │                 │               │
+│  │  • Alert History│  │    (7d, 1min)   │  │                 │               │
+│  │                 │  │  • metrics_1h   │  │                 │               │
+│  │                 │  │    (1y, 1hr)    │  │                 │               │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘               │
+│                                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Data Flow
 
 1. **Agents** collect metrics every 5 seconds and POST to Ingestion Service
-2. **Ingestion Service** publishes metrics to Kafka topic `metrics`
+2. **Ingestion Service** validates token and publishes to Kafka topic `metrics`
 3. **Kafka** provides durable message streaming with 24-hour retention
-4. **Consumers** (Distribution, History, Alert) process messages independently:
+4. **Consumers** process messages independently:
    - **Distribution Service**: Broadcasts to WebSocket clients in real-time
    - **History Service**: Stores in InfluxDB tiered buckets with automatic downsampling
-   - **Alert Service**: Checks threshold rules and sends Telegram notifications
-5. **Redis** caches latest metrics per agent for immediate alert rule evaluation
+   - **Alert Service**: Checks threshold rules, caches in Redis, sends Telegram notifications
 
 ---
 
