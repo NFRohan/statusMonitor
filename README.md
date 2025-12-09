@@ -79,7 +79,7 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 |-----------|------------|---------|
 | **Frontend** | React 19 + Vite + Tailwind CSS | Interactive web dashboard |
 | **Auth Service** | FastAPI + PostgreSQL | User authentication & agent management |
-| **Ingestion Service** | FastAPI + Kafka | Metrics collection & event streaming |
+| **Ingestion Service** | FastAPI + Kafka + Redis | Metrics collection & event streaming |
 | **Distribution Service** | FastAPI + WebSocket + Kafka | Real-time data broadcast |
 | **History Service** | FastAPI + InfluxDB + Kafka | Time-series storage with downsampling |
 | **Alert Service** | FastAPI + Kafka + Telegram | Threshold-based alerting with history |
@@ -97,7 +97,8 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 - **Multi-Agent Support**: Monitor multiple machines from a single dashboard
 
 ### 📊 Data Pipeline
-- **Kafka Event Streaming**: Durable message queue with 24-hour retention
+- **Kafka 4.1.1 (KRaft)**: Durable message queue with 24-hour retention
+- **Redis Token Caching**: Agent tokens cached for 5 minutes, reducing auth service load by ~99%
 - **Tiered Storage**: Three retention tiers for optimal storage efficiency
   - Raw data (configurable interval, default 5s) → 24 hours
   - 1-minute aggregates → 7 days
@@ -158,14 +159,14 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 │  │  Distribution   │    │Ingestion Service│    │  Auth Service   │           │
 │  │    Service      │    │     :8001       │    │     :8000       │           │
 │  │     :8002       │    │                 │    │                 │           │
-│  │                 │    │  • Validate     │    │  • JWT Auth     │           │
-│  │  • Kafka Sub    │    │    Agent Token  │    │  • User Mgmt    │           │
+│  │                 │    │  • Token Cache  │    │  • JWT Auth     │           │
+│  │  • Kafka Sub    │    │    (Redis)      │    │  • User Mgmt    │           │
 │  │  • WebSocket    │    │  • Kafka Pub    │    │  • Agent Tokens │           │
-│  └────────┬────────┘    └────────┬────────┘    └────────┬────────┘           │
-│           │                      │                      │                     │
-│           │                      ▼                      │                     │
+│  └────────┬────────┘    └───────┬─────────┘    └────────┬────────┘           │
+│           │                     │                       │                     │
+│           │                     ▼                       │                     │
 │           │             ┌─────────────────┐             │                     │
-│           └────────────►│     KAFKA       │             │                     │
+│           └────────────►│  KAFKA (KRaft)  │             │                     │
 │                         │     :9092       │             │                     │
 │                         │                 │             │                     │
 │                         │  Topic: metrics │             │                     │
@@ -190,20 +191,21 @@ StatusMonitor is a comprehensive system monitoring solution that collects, store
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                            DATA STORES                                        │
 │                                                                               │
-│  ┌─────────────────────────────┐  ┌─────────────────────────────┐            │
-│  │        PostgreSQL           │  │         InfluxDB            │            │
-│  │          :5432              │  │          :8086              │            │
-│  │                             │  │                             │            │
-│  │  • Users                    │  │  • metrics_raw (24h, raw)   │            │
-│  │  • Agents                   │  │  • metrics_1m (7d, 1min)    │            │
-│  │  • Alert Rules              │  │  • metrics_1h (1yr, 1hr)    │            │
-│  │  • Alert History            │  │                             │            │
-│  │  • Refresh Tokens           │  │                             │            │
-│  └─────────────────────────────┘  └─────────────────────────────┘            │
-│              ▲                               ▲                                │
-│              │                               │                                │
-│      Auth & Alert Services            History Service                         │
-│                                                                               │
+│  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐         │
+│  │    PostgreSQL     │  │     InfluxDB      │  │      Redis        │         │
+│  │      :5432        │  │      :8086        │  │      :6379        │         │
+│  │                   │  │                   │  │                   │         │
+│  │  • Users          │  │  • metrics_raw    │  │  • Token Cache    │         │
+│  │  • Agents         │  │    (24h, raw)     │  │    (5min TTL)     │         │
+│  │  • Alert Rules    │  │  • metrics_1m     │  │                   │         │
+│  │  • Alert History  │  │    (7d, 1min)     │  │                   │         │
+│  │  • Refresh Tokens │  │  • metrics_1h     │  │                   │         │
+│  │                   │  │    (1yr, 1hr)     │  │                   │         │
+│  └───────────────────┘  └───────────────────┘  └───────────────────┘         │
+│          ▲                       ▲                       ▲                    │
+│          │                       │                       │                    │
+│   Auth & Alert             History Service        Ingestion Service           │
+│    Services                                                                   │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -297,6 +299,7 @@ docker-compose up -d
 | History Service | 8003 |
 | Alert Service | 8004 |
 | PostgreSQL | 5432 |
+| Redis | 6379 |
 | Kafka | 9092 |
 | InfluxDB | 8086 |
 
@@ -427,6 +430,7 @@ python agent_service/main.py
 | `POSTGRES_PASSWORD` | statusmonitor | Database password |
 | `SECRET_KEY` | (required) | JWT signing key |
 | `KAFKA_BOOTSTRAP_SERVERS` | kafka:29092 | Kafka broker address |
+| `REDIS_URL` | redis://redis:6379 | Redis cache connection URL |
 | `INFLUXDB_TOKEN` | (required) | InfluxDB admin token |
 | `TELEGRAM_BOT_TOKEN` | (optional) | Telegram bot for alerts |
 | `CORS_ORIGINS` | localhost:5173 | Comma-separated allowed CORS origins |
