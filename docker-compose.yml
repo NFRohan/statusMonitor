@@ -49,6 +49,23 @@ services:
       retries: 5
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    container_name: statusmonitor-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - statusmonitor-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   auth-service:
     build:
       context: ./auth_service
@@ -82,12 +99,15 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       auth-service:
         condition: service_healthy
     networks:
       - statusmonitor-network
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
       - AUTH_SERVICE_URL=http://auth-service:8000
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174}
     healthcheck:
@@ -222,6 +242,7 @@ services:
 volumes:
   postgres-data:
   kafka-data:
+  redis-data:
   influxdb-data:
   influxdb-config:
 
