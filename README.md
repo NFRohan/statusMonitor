@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/FastAPI-0.115-green?logo=fastapi" alt="FastAPI">
   <img src="https://img.shields.io/badge/PostgreSQL-16-blue?logo=postgresql" alt="PostgreSQL 16">
   <img src="https://img.shields.io/badge/InfluxDB-2.7-purple?logo=influxdb" alt="InfluxDB">
-  <img src="https://img.shields.io/badge/Kafka-7.5-black?logo=apachekafka" alt="Apache Kafka">
+  <img src="https://img.shields.io/badge/Kafka-4.1.1-black?logo=apachekafka" alt="Apache Kafka">
   <img src="https://img.shields.io/badge/Docker-Compose-blue?logo=docker" alt="Docker Compose">
 </p>
 

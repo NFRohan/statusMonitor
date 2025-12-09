@@ -132,8 +132,9 @@ class MetricsCollector:
     
     @classmethod
     def get_cpu_metrics(cls):
-        # Use interval=1 for accurate usage reading
-        usage = psutil.cpu_percent(interval=1)
+        # Non-blocking: uses time since last call for measurement
+        # Primed during initialize() so first call is accurate
+        usage = psutil.cpu_percent(interval=None)
         per_core = psutil.cpu_percent(interval=None, percpu=True)
         
         # Get accurate frequency from our new monitor
